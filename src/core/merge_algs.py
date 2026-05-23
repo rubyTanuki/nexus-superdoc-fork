@@ -1,59 +1,63 @@
-from models.tokens import CustomAIHeading
-from models.tree_nodes import EmbedTreeNode
+from src.models.tokens import CustomHeading
+from src.models.tree_nodes import EmbedTreeNode
 from mistletoe.span_token import RawText
-from sercies.openai_client import OpenAIProcessor
+from src.services.openai_client import OpenAIProcessor
 
 from mistletoe.block_token import BlockToken
 from mistletoe.span_token import SpanToken, RawText
 
 
+
+import numpy as np
+from typing import List, Generator, Optional, Dict, Tuple
+from pydantic import BaseModel
+
 MIN_BLOCK_LEN = 20
 SIMILARITY_THRESHOLD=0.97
 
+class DB_Heading(BaseModel):
+        """Schema for headings retrieved from Pinecone/Database.""" 
+        id: str 
+        heading: Optional[str]
+        position: Optional[int]
+        embedding: List[float]
 
 class TreeEmbedder:
-    def __init__(self, OpenAIProcessor):
+    def __init__(self, openai_processor):
         """
         openai_processor: instance of OpenAIProcessor from services/openai_client.py
         """
         self.ai = openai_processor
 
     def embed_tree(self, root):
-        """
-        Orchestrates the post-render semantic processing using the OpenAI wrapper.
-        """
-        # Calculate block lengths of all subtrees 
-        self._calculate_block_len(root)
-        # 1. Collect all headings for batching (Stage 3)
-        # Using root.apply or root.walk to get a flat list
-        headings = [node for node in root.apply(lambda x: x) if (node.type == 'heading' and node.block_len>=MIN_BLOCK_LEN)]
-
-        
-        # 2. Batch Embedding Request via our wrapper
-        # We extract content from the underlying mistletoe SyntaxTreeNode
-        texts = [h.node.raw_text for h in headings]
-        embeddings = self.ai.embed_documents(texts) 
-        
-        # 3. Assign Embeddings and metadata
-        for node, emb in zip(headings, embeddings):
-            node.emb = emb
-            node.has_embedding = True
-            
-        # 4. Bottom-up traversal for word counts (Post-order)
+        # 1. Update lengths
         self._calculate_block_len(root)
 
+        # 2. Collect headings (case-insensitive and handling H1, H2, Heading)
+        headings = []
+        for node in root.apply(lambda x: x):
+            t_lower = node.type.lower()
+            if (t_lower == 'heading' or t_lower.startswith('h')) and node.block_len >= MIN_BLOCK_LEN:
+                headings.append(node)
 
-
-        heading_nodes = [n for n in node.apply(lambda x: x) if n.type == 'heading']
-        
-        if not heading_nodes:
+        if not headings:
+            print("DEBUG: No headings met the MIN_BLOCK_LEN criteria.")
             return
-        heading_nodes_content = [h_node.content for h_node in heading_nodes]
-        heading_node_vectors = node.emb_model.embed_documents(heading_nodes_content)
 
-        for h_node,h_vector in zip(heading_nodes,heading_node_vectors):
-            h_node.has_embedding = True 
-            h_node.emb = h_vector
+        # 3. Extract text carefully using our Syntax helper
+        texts = [EmbedTreeNode(h.node).content for h in headings]
+
+        # 4. Request embeddings
+        embeddings = self.ai.embed_documents(texts) 
+
+        # 5. Assign to the CORRECT slot (.embedding to match your printer)
+        for node, emb in zip(headings, embeddings):
+            node.embedding = emb # Match the slot name in EmbedTreeNode
+            # If you have a has_embedding slot, set it here
+            if hasattr(node, 'is_custom_node'): # using existing slots for state
+                pass 
+
+        print(f"DEBUG: Successfully embedded {len(headings)} headings.")
 
     def _calculate_block_len(self, node):
         """
@@ -67,7 +71,7 @@ class TreeEmbedder:
             current_text_len = len(node.raw_text.split())
             
         # Sum children recursively
-        subtree_len = sum(self._calculate_block_metrics(child) for child in node.children)
+        subtree_len = sum(self._calculate_block_len(child) for child in node.children)
         
         node.block_len = current_text_len + subtree_len
         return node.block_len
@@ -75,37 +79,209 @@ class TreeEmbedder:
 
 
 
-
 class SemanticReconciler:
-    def __init__(self, embedding_service, llm_service):
+    def __init__(self, embedding_service, llm_service, similarity_threshold=0.8, min_block_len=20):
         self.embeddings = embedding_service
         self.llm = llm_service
+        self.SIMILARITY_THRESHOLD = similarity_threshold
+        self.MIN_BLOCK_LEN = min_block_len
 
-    def reconcile(self, root, db_headings):
-        """Stage 5: High-level orchestration of algorithms."""
-        self.detect_and_fix_stragglers(root)
-        self.prune_semantic_mismatches(root, db_headings)
+    # --- 1. Matching Logic ---
 
-    def detect_and_fix_stragglers(self, node):
-        """Stage 5.1 & 5.2: Injects custom headings for orphan batches."""
-        orphans = [c for c in node.children if c.level is None]
+    def match_headings(self, root, db_headings: List[DB_Heading]) -> Dict['EmbedTreeNode', str]:
+        """
+        Uses cosine similarity to find the best match between current tree branches 
+        and existing headings in the database.
+        """
+        # Filter for valid embeddings
+        heading_vecs = np.array([h.embedding for h in db_headings if len(h.embedding) == 1536])
         
-        if len(orphans) > 5: # Threshold for a 'batch'
-            # 1. Get AI Heading
-            txt_batch = " ".join([c.token.content for c in orphans[:3]])
-            ai_title = self.llm.generate_title(txt_batch)
+        def check_node_against_headings(node):
+            if heading_vecs.size == 0: 
+                return None
+            # Standardize type check
+            t_type = node.type.lower()
+            if t_type == "root":
+                return None
+            if node.block_len < self.MIN_BLOCK_LEN:
+                return None
+            # Check for embedding in the slot we defined
+            if node.embedding is None: 
+                return None
+                
+            # Note: find_closest_cosine_sim needs to be available in scope
+            most_similar_idx, similarity = find_closest_cosine_sim(node.embedding, heading_vecs)
             
-            # 2. Build Custom Node
-            mock_token = CustomAIHeading(ai_title)
-            new_section = EmbedTreeNode(mock_token, level=node.level + 1)
-            new_section.is_custom_node = True
-            
-            # 3. Surgery: Move orphans under the new section
-            for o in orphans:
-                node.children.remove(o)
-                new_section.add_child(o)
-            node.add_child(new_section)
+            if similarity < self.SIMILARITY_THRESHOLD:
+                return None   
+            return (db_headings[most_similar_idx].heading, node)
 
-        # Recurse
+        print(f"Fetched Headings len: {len(db_headings)}")
+        
+        # Use the apply method on the root to traverse
+        node_heading_pairs = {
+            node: heading 
+            for result in root.apply(check_node_against_headings)
+            if result is not None 
+            for heading, node in [result]
+        }
+        return node_heading_pairs
+
+    # --- 2. Straggler Detection ---
+
+    @staticmethod
+    def find_straggler_branches(node, min_block_len: int) -> Generator[List['EmbedTreeNode'], None, None]:
+        """
+        Identifies 'orphan' content blocks that aren't under a heading.
+        """
+        if node.block_len < min_block_len:
+            return 
+    
+        # Boundary Check
+        t_type = node.type.lower()
+        is_boundary = (
+            getattr(node, 'is_custom_node', False) or 
+            node.embedding is not None or 
+            t_type.startswith('h')
+        )
+    
+        if is_boundary and node.node.__class__.__name__.lower() != "roottoken":
+            for child in node.children:
+                yield from SemanticReconciler.find_straggler_branches(child, min_block_len)
+            return
+    
+        # Traversal Logic
+        if node.node.__class__.__name__.lower() == "roottoken" or getattr(node, 'has_custom_node', False):
+            current_group = []
+            for child in node.children:
+                child_is_boundary = (
+                    getattr(child, 'is_custom_node', False) or 
+                    child.embedding is not None or 
+                    child.type.lower().startswith('h') or
+                    getattr(child, 'has_custom_node', False)
+                )
+    
+                if not child_is_boundary:
+                    if child.block_len >= min_block_len:
+                        current_group.append(child)
+                else:
+                    if current_group:
+                        yield current_group
+                        current_group = []
+                    yield from SemanticReconciler.find_straggler_branches(child, min_block_len)
+    
+            if current_group:
+                yield current_group
+        else:
+            yield [node]
+
+    # --- 3. Surgery & Pruning ---
+
+    def mark_structural_mismatch(self, node, target_heading: str, node_heading_pairs: dict):
         for child in node.children:
-            self.detect_and_fix_stragglers(child)
+            matched_heading = node_heading_pairs.get(child)
+            if matched_heading and target_heading and (matched_heading != target_heading):
+                child.is_pruned = True
+            else:
+                self.mark_structural_mismatch(child, target_heading, node_heading_pairs)
+
+    def mark_semantic_mismatch(self, node, anchor_vector: np.ndarray):
+        if anchor_vector is None: return
+        for child in node.children:
+            if child.embedding is not None:
+                norm_a, norm_c = np.linalg.norm(anchor_vector), np.linalg.norm(child.embedding)
+                if norm_a > 0 and norm_c > 0:
+                    if (np.dot(anchor_vector, child.embedding) / (norm_a * norm_c)) < self.SIMILARITY_THRESHOLD:
+                        child.is_pruned = True
+                        continue
+            self.mark_semantic_mismatch(child, anchor_vector)
+
+    def execute_pruning(self, node):
+        for child in list(node.children):
+            if child.is_pruned:
+                node.children.remove(child)
+                child.parent = None
+                yield child
+            else:
+                yield from self.execute_pruning(child)
+
+
+    
+    def reconcile_structure(self, root: 'EmbedTreeNode', db_headings: List[DB_Heading]) -> Tuple[list, list]:
+        """
+        Orchestrates the semantic merge:
+        1. Injects LLM headings for orphans.
+        2. Matches tree branches to database headings.
+        3. Prunes mismatched content.
+        """
+        
+        # 1. Detect Stragglers (Orphan batches)
+        straggler_batches = [b for b in self.find_straggler_branches(root, self.MIN_BLOCK_LEN) if b]
+        
+        # 2. Sample text and Generate Headings via LLM
+        # get_sampled_text logic should look at SyntaxTreeNode(node.node).content
+        sampled_contents = [get_sampled_text(batch) for batch in straggler_batches]
+        generated_headings = self.llm.generate_headings_from_sentences(sampled_contents)
+
+        batch_nodes = []
+        for batch, heading_text in zip(straggler_batches, generated_headings):
+            print(f"Injecting Custom Node: {heading_text}")
+            
+            # Use MarkdownIt to create a valid Mistletoe-compatible token structure
+            tokens = self.mdit.parse(f"# {heading_text}")
+            # tokens[0] is usually the heading_open, tokens[1] is inline
+            # We wrap the first relevant token in our SyntaxTreeNode
+            heading_token = tokens[0] 
+            
+            # Create the custom section node
+            cus_node = EmbedTreeNode(heading_token, level=batch[0].level or 1)
+            cus_node.is_custom_node = True
+            cus_node.children = batch
+            
+            # Surgery: Update parent references for the batch
+            for child in batch:
+                child.parent = cus_node
+            
+            # Insert the new branch into the root (or appropriate parent)
+            root.add_child(cus_node)
+            batch_nodes.append(cus_node)
+
+        # 3. Embed the new custom headings
+        if generated_headings:
+            vectors = self.embeddings.embed_documents(generated_headings)
+            for h_node, h_vector in zip(batch_nodes, vectors):
+                h_node.embedding = np.array(h_vector)
+
+        # 4. Calculate Mean Embeddings (Recursive bottom-up)
+        self._calc_mean_embedding(root)
+
+        # 5. Match current tree branches to DB headings
+        node_heading_pairs = self.match_headings(root, db_headings)
+
+        # 6. Flag Mismatches
+        for child in root.children:
+            target_heading = node_heading_pairs.get(child)
+
+            if target_heading:
+                self.mark_structural_mismatch(child, target_heading, node_heading_pairs)
+            
+            # If it's a custom node we just made, check if children still belong semantically
+            if child.is_custom_node and child.embedding is not None:
+                self.mark_semantic_mismatch(child, child.embedding)
+
+        # 7. Execute Pruning (Detach the flagged branches)
+        pruned_nodes = list(self.execute_pruning(root))
+
+        # 8. Identify all custom and new nodes for DB updates
+        # apply(lambda n: n) gives a flat list of the survived tree
+        main_tree_branches = [n for n in root.apply(lambda n: n) if getattr(n, 'is_custom_node', False)]
+        all_cust_nodes = main_tree_branches + pruned_nodes
+        
+        all_matched_nodes = set(node_heading_pairs.keys())
+        new_cust_nodes = [n for n in all_cust_nodes if n not in all_matched_nodes]
+        
+        return new_cust_nodes, all_cust_nodes
+
+
+if __name__ == "__main__": 
+    pass

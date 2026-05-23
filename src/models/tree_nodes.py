@@ -1,8 +1,15 @@
 import numpy as np
+from typing import List, Callable, Any, Generator, Iterator, Self ,TypeVar, Optional
+
+from mistletoe.block_token import BlockToken
+from mistletoe.span_token import SpanToken, RawText
 
 class EmbedTreeNode:
+
+    __slots__ = ['node', 'type', 'parent', 'children', 'block_len', 'embedding', 'level', 'is_custom_node', 'is_pruned']
+
     def __init__(self, mistletoe_token, level=None):
-        self.token = mistletoe_token
+        self.node = mistletoe_token
         self.type = mistletoe_token.__class__.__name__
 
         self.level = level
@@ -27,7 +34,7 @@ class EmbedTreeNode:
         # This helper only collects text from SpanTokens (inlines)
         def _extract_inline(token) -> str:
             if isinstance(token, RawText):
-                return token.raw_text
+                return token.content
 
             # Only recurse into inline formatting (Strong, Emphasis, etc.)
             if isinstance(token, SpanToken) and hasattr(token, 'children'):
@@ -73,13 +80,12 @@ class EmbedTreeNode:
         return _recursive_text(self.node).strip()
 
 
-    def add_child(self, child):
-        child.parent = self
-        self.children.append(child)
+    def add_child(self, child_node):
+        self.children.append(child_node)
 
     def apply(self,func: Callable[["EmbedTreeNode"],Any])->Generator[Any,None,None]:
         """A visitor-pattern implementation to apply a function across every node in the tree."""
-        if self.node.type!="root":
+        if self.type!="root":
             yield func(self)#yeild the result of the func on current node
         for child in self.children: 
             yield from child.apply(func)#recursively yield from da children
