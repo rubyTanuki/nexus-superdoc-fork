@@ -1,110 +1,27 @@
 import pymupdf
 import pymupdf4llm
-import mistletoe
+
 from io import BytesIO
+
+import mistletoe
 from mistletoe.block_token import BlockToken, Heading, Paragraph
 from mistletoe.span_token import SpanToken, RawText
-# --- 1. THE PROPERTY LOGIC (Fixed & Partitioned) ---
-class SyntaxTreeNode:
-    """Mock of your node wrapper to demonstrate the property."""
-    def __init__(self, token):
-        self.node = token
-        self.type = token.__class__.__name__
 
-    @property
-    def content(self) -> str:
-        if not self.node: return ""
-        
-        # Internal helper to grab text from ANY depth within this specific node
-        def _recursive_text(token) -> str:
-            if isinstance(token, RawText):
-                return token.content
-            if hasattr(token, 'children') and token.children:
-                # Join with space to prevent words from merging between cells/items
-                return " ".join(_recursive_text(c) for c in token.children)
-            return getattr(token, 'content', "")
+from src.models.tree_nodes import EmbedTreeNode
+from src.core.semantic_renderer import SemanticTreeBuilder
+from src.core.merge_algs import TreeEmbedder, SemanticReconciler, DB_Heading
+from src.services.openai_client import OpenAIProcessor
+from src.services.pinecone_client import VectorDBManager
 
-        # Logic Partition:
-        # If it's a Heading or Paragraph, we usually just want the span text.
-        # If it's a Table or List, we need to dig into Rows/Cells/Items.
-        return _recursive_text(self.node).strip()
+from pinecone import Pinecone, IndexModel, ServerlessSpec
+
+from langchain_openai import OpenAIEmbeddings,ChatOpenAI
 
 
-# --- 2. THE MONOTONIC STACK RENDERER ---
-class SemanticTreeBuilder(mistletoe.base_renderer.BaseRenderer):
-    def __init__(self):
-        super().__init__()
-        self.root = {"type": "ROOT", "children": [], "level": 0}
-        self.stack = [(0, self.root)]
 
-    def _handle_block(self, token, type_name=None):
-        """Helper to wrap block tokens, consumes children to prevent duplicates."""
-        t_type = type_name or token.__class__.__name__.upper()
-        
-        # Use our property to get text
-        label = SyntaxTreeNode(token).content
-        
-        # If the block is empty and has no children, skip it
-        if not label and not hasattr(token, 'children'):
-            return ""
-
-        new_node = {
-            "type": t_type, 
-            "label": (label[:75] + "...") if len(label) > 75 else label,
-            "children": []
-        }
-        
-        self.stack[-1][1]["children"].append(new_node)
-        
-        # IMPORTANT: We do NOT call self.render_inner(token) here 
-        # because we've already "consumed" the text via SyntaxTreeNode(token).content.
-        # This prevents the children from being rendered again as siblings.
-        return ""
-
-    def render_heading(self, token):
-        label = SyntaxTreeNode(token).content
-        new_node = {"type": f"H{token.level}", "label": label, "children": []}
-        
-        # Monotonic stack logic: maintains the H1 > H2 > H3 hierarchy
-        while len(self.stack) > 1 and self.stack[-1][0] >= token.level:
-            self.stack.pop()
-            
-        self.stack[-1][1]["children"].append(new_node)
-        self.stack.append((token.level, new_node))
-        return ""
-
-    def render_list(self, token):
-        # We handle the list as one semantic unit
-        return self._handle_block(token, "LIST")
-
-    def render_table(self, token):
-        # We handle the table as one semantic unit
-        return self._handle_block(token, "TABLE")
-
-    def render_paragraph(self, token):
-        # Only render paragraph if it's not just a duplicate title
-        label = SyntaxTreeNode(token).content
-        if label.lower() in ["lists", "table", "quote"]:
-            return "" # Skip "labels" that are actually just metadata
-            
-        return self._handle_block(token, "PARA")
-
-    def render_quote_block(self, token):
-        self._handle_block(token, "QUOTE")
-        return ""
-
-    def render_code_block(self, token):
-        self._handle_block(token, "CODE")
-        return ""
-
-    def render_thematic_break(self, token):
-        self._handle_block(token, "HR")
-        return ""
-
-    def render_document(self, token):
-        self.render_inner(token)
-        return self.root
-
+import os
+from dotenv import load_dotenv
+load_dotenv()
 # --- 3. DEBUG PRINTERS ---
 def print_raw_ast(token, indent=0):
     """Shows mistletoe's native flat structure."""
@@ -117,24 +34,40 @@ def print_raw_ast(token, indent=0):
                 print_raw_ast(c, indent + 1)
 
 def print_semantic_tree(node, indent=0):
-    """Shows the nested structure with formatted labels for Tables/Lists."""
     pref = "  " * indent
     
-    # Get the label and clean it up
-    raw_label = node.get('label', "")
+    # 1. Extract text content using the Syntax helper
+    if hasattr(node, 'node') and node.node:
+        # Use the helper to reach into the mistletoe token
+        raw_label = EmbedTreeNode(node.node).content
+    else:
+        raw_label = ""
+
+    # 2. Format Embedding snippet (First 5 digits of the first 3 dimensions)
+    emb_str = ""
+    if hasattr(node, 'embedding') and node.embedding is not None:
+        # Take the first 3 values and format each to 5 decimal places
+        snippet = [f"{val:.5f}" for val in node.embedding[:3]]
+        emb_str = f" [Emb: {', '.join(snippet)}...]"
+    else:
+        emb_str = " [No Emb]"
+
+    # 3. Access attributes defined in your __slots__
+    t_type = node.type
     
-    # If it's a table, let's at least show some structure
-    if node['type'] == 'TABLE':
-        # Simple cleanup: replace multiple spaces with one for a 'row' feel
+    if t_type == 'TABLE':
+        # Table formatting
         label = " | " + " ".join(raw_label.split())
     else:
-        # Standard truncation for paragraphs/headings
+        # Paragraph/Heading formatting
         label = f": {raw_label[:80]}..." if len(raw_label) > 80 else f": {raw_label}"
-
-    print(f"{pref}└── [{node['type']}]{label}")
     
-    # Recurse
-    for child in node.get('children', []):
+    # 4. Assemble the final debug line
+    stats = f" [Words: {node.block_len}]{emb_str}"
+    print(f"{pref}└── [{t_type}]{stats}{label}")
+    
+    # 5. Recurse
+    for child in node.children:
         print_semantic_tree(child, indent + 1)
 
 
@@ -142,27 +75,64 @@ def print_semantic_tree(node, indent=0):
 # --- 4. EXECUTION ---
 def test_pdf_structure(file_path):
     print(f"--- Processing: {file_path} ---")
-    
-    # PDF to Markdown
+
+    # PDF → Markdown
     doc = pymupdf.open(file_path)
-    md_text = pymupdf4llm.to_markdown(doc,force_markdown=True)
+    md_text = pymupdf4llm.to_markdown(doc, force_markdown=True)
     print('----Markdown----')
     print(md_text)
     print('----End-Of-MD---')
-    # Parse with Mistletoe
+
+    # Shared AI client
+    ai = OpenAIProcessor()
+
+    # Parse with Mistletoe + build semantic tree
     mistletoe_doc = mistletoe.Document(md_text)
-    
-    print("\n[TEST 1] RAW MISTLETOE AST (The Siblings)")
-    print_raw_ast(mistletoe_doc)
-    
-    print("\n" + "="*50)
-    
-    print("\n[TEST 2] NESTED SEMANTIC TREE (The Stack Output)")
+    print("\nNESTED SEMANTIC TREE (The Stack Output)")
     with SemanticTreeBuilder() as builder:
         nested_tree = builder.render(mistletoe_doc)
-        print_semantic_tree(nested_tree)
 
+    # Embed tree nodes
+    tembdr = TreeEmbedder(ai)
+    tembdr.embed_tree(nested_tree)
+    print_semantic_tree(nested_tree)
+    print("\n" + "=" * 50)
 
+    # Fetch existing DB headings
+    index_name = os.getenv("PINECONE_INDEX", "superdoc-headings")
+    vec_db = VectorDBManager(pc=Pinecone(os.environ.get("PINECONE_API_KEY")))
+    vec_db.initVectorStore(index_name=index_name, embedding=OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY")))
+
+    COURSE_ID = "Goof1202"
+    DOCUMENT_ID = "1Q1whz1kFN9wj1_mamWgaDbKh7przNmc5owdOSNovC04"
+    existing_headings = [
+    DB_Heading(**h) for h in vec_db.get_all_headings_for_doc(
+        course_id=COURSE_ID,
+        superdoc_id=DOCUMENT_ID
+    )
+    if h.get("embedding") and len(h["embedding"]) == 1536
+]
+    print(f"Fetched {len(existing_headings)} existing headings from DB.")
+
+    # Run merge / reconciliation
+    smr = SemanticReconciler(
+        embedding_service=ai,
+        llm_service=ai,              # OpenAIProcessor satisfies both interfaces
+        similarity_threshold=0.97,   # matches your module-level SIMILARITY_THRESHOLD
+        min_block_len=20             # matches MIN_BLOCK_LEN
+    )
+    new_cust_nodes, all_cust_nodes = smr.reconcile_structure(nested_tree, existing_headings)
+
+    print(f"\n--- Reconciliation Results ---")
+    print(f"New headings to insert into DB : {len(new_cust_nodes)}")
+    for node in new_cust_nodes:
+        print(f"  + {getattr(node, 'heading', repr(node))}")
+
+    print(f"All custom/pruned nodes tracked: {len(all_cust_nodes)}")
+    for node in all_cust_nodes:
+        pruned = getattr(node, 'is_pruned', False)
+        label = getattr(node, 'heading', repr(node))
+        print(f"  {'[PRUNED]' if pruned else '[KEPT  ]'} {label}")
 
 if __name__ == "__main__":
     # Change this to your actual file path
