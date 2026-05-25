@@ -227,7 +227,7 @@ class SemanticReconciler:
         for node in nodes:
             # Walk up the parent chain
             ancestor = node.parent
-            is_redundant = False
+            is_redundant = False   
             while ancestor:
                 if ancestor in node_set:
                     is_redundant = True
@@ -313,8 +313,9 @@ class SemanticReconciler:
 
         # New ones = not in DB yet (no match found)
         new_cust_nodes = [n for n in all_render_nodes if n not in all_matched_nodes]
-
-        return new_cust_nodes, all_render_nodes
+        for node in live_render_nodes:
+            print(f"{node.content!r} parent → {node.parent.type if node.parent else None} | {node.parent.content if node.parent else None}")
+        return new_cust_nodes, all_render_nodes, node_heading_pairs
 
 def find_closest_cosine_sim(query_vec,list_vecs)->tuple[int,float]:
     """

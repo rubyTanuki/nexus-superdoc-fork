@@ -4,6 +4,7 @@ from typing import List, Callable, Any, Generator, Iterator, Self ,TypeVar, Opti
 from mistletoe.block_token import BlockToken
 from mistletoe.span_token import SpanToken, RawText
 
+
 class EmbedTreeNode:
 
     __slots__ = ['node', 'type', 'parent', 'children', 'block_len', 'embedding','mean_emb','level', 'is_custom_node', 'is_pruned', "has_embedding"]
@@ -83,6 +84,7 @@ class EmbedTreeNode:
 
 
     def add_child(self, child_node):
+        child_node.parent = self
         self.children.append(child_node)
 
     def apply(self,func: Callable[["EmbedTreeNode"],Any])->Generator[Any,None,None]:
@@ -91,3 +93,52 @@ class EmbedTreeNode:
             yield func(self)#yeild the result of the func on current node
         for child in self.children: 
             yield from child.apply(func)#recursively yield from da children
+
+
+
+
+ 
+def _utf16_len(text: str) -> int:
+    """Google Docs indices are UTF-16 code units, not bytes or chars."""
+    return len(text.encode("utf-16-le")) // 2
+ 
+ 
+class GdocTreeNode:
+    __slots__ = ['node', 'type', 'level', 'parent', 'children', 'content', 'matched_heading', 'requests']
+ 
+    def __init__(self, embed_node: EmbedTreeNode):
+        self.node = embed_node
+        self.type = embed_node.type
+        self.level = embed_node.level or 0
+        self.parent = None
+        self.children: list['GdocTreeNode'] = []
+        self.content: str = embed_node.content or ""
+        self.matched_heading: str | None = None  # None = new/unmatched, str = DB heading label
+        self.requests: list[dict] = []           # Google Docs BatchUpdate requests for this node
+ 
+    def add_child(self, child_node: 'GdocTreeNode'):
+        child_node.parent = self
+        self.children.append(child_node)
+ 
+    def apply(self, func: Callable[['GdocTreeNode'], Any]) -> Generator[Any, None, None]:
+        if self.type != 'ROOT':
+            yield func(self)
+        for child in self.children:
+            yield from child.apply(func)
+ 
+    def __str__(self) -> str:
+        return self._format_tree(level=0)
+ 
+    def _format_tree(self, level: int) -> str:
+        indent = "  " * level
+        matched = f"[MATCHED: {self.matched_heading}]" if self.matched_heading else "[UNMATCHED]"
+        req_count = f"[{len(self.requests)} reqs]"
+        header = f"{indent}{matched} {req_count} {self.type.upper()} [L:{self.level}]"
+        snippet = ""
+        if self.content:
+            preview = self.content.strip().replace("\n", " ")
+            preview = (preview[:60] + "..") if len(preview) > 60 else preview
+            snippet = f"\n{indent}  | \"{preview}\""
+        children_str = "".join(child._format_tree(level + 1) for child in self.children)
+        return f"\n{header}{snippet}{children_str}"
+ 
