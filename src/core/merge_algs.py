@@ -2,6 +2,7 @@ from src.models.tokens import CustomHeading
 from src.models.tree_nodes import EmbedTreeNode
 from mistletoe.span_token import RawText
 from src.services.openai_client import OpenAIProcessor
+from src.services.pinecone_client import DB_Heading
 
 from mistletoe.block_token import BlockToken
 from mistletoe.span_token import SpanToken, RawText
@@ -12,15 +13,9 @@ import numpy as np
 from typing import List, Generator, Optional, Dict, Tuple
 from pydantic import BaseModel
 
-MIN_BLOCK_LEN = 20
+MIN_BLOCK_LEN = 5
 SIMILARITY_THRESHOLD=0.97
 
-class DB_Heading(BaseModel):
-        """Schema for headings retrieved from Pinecone/Database.""" 
-        id: str 
-        heading: Optional[str]
-        position: Optional[int]
-        embedding: List[float]
 
 class TreeEmbedder:
     def __init__(self, openai_processor):
@@ -53,6 +48,7 @@ class TreeEmbedder:
         # 5. Assign to the CORRECT slot (.embedding to match your printer)
         for node, emb in zip(headings, embeddings):
             node.embedding = emb # Match the slot name in EmbedTreeNode
+            node.has_embedding = True
             # If you have a has_embedding slot, set it here
             if hasattr(node, 'is_custom_node'): # using existing slots for state
                 pass 
@@ -76,6 +72,7 @@ class TreeEmbedder:
         node.block_len = current_text_len + subtree_len
         return node.block_len
 
+    
 
 
 
@@ -205,8 +202,41 @@ class SemanticReconciler:
             else:
                 yield from self.execute_pruning(child)
 
+    def _calc_mean_embedding(self, node):
+        """
+        Calculates a 'Semantic Centroid' for each branch. 
+        It averages the embeddings of all children to create a vector 
+        representing the overall meaning of that section.
+        """ 
+        for child in node.children: 
+           self._calc_mean_embedding(child)
 
+        # Collect only non-None, non-zero embeddings from children
+        children_embs = [c.mean_emb for c in node.children if c.mean_emb is not None and np.any(c.mean_emb)]
+
+        current_emb = node.mean_emb if (node.mean_emb is not None and np.any(node.mean_emb)) else None
+
+        if children_embs or current_emb is not None:
+            all_vecs = children_embs + ([current_emb] if current_emb is not None else [])
+            node.embedding = np.mean(all_vecs, axis=0)
     
+
+    def deduplicate_by_ancestry(self,nodes: list) -> list:
+        node_set = set(nodes)
+        result = []
+        for node in nodes:
+            # Walk up the parent chain
+            ancestor = node.parent
+            is_redundant = False
+            while ancestor:
+                if ancestor in node_set:
+                    is_redundant = True
+                    break
+                ancestor = ancestor.parent
+            if not is_redundant:
+                result.append(node)
+        return result
+
     def reconcile_structure(self, root: 'EmbedTreeNode', db_headings: List[DB_Heading]) -> Tuple[list, list]:
         """
         Orchestrates the semantic merge:
@@ -221,7 +251,7 @@ class SemanticReconciler:
         # 2. Sample text and Generate Headings via LLM
         # get_sampled_text logic should look at SyntaxTreeNode(node.node).content
         sampled_contents = [get_sampled_text(batch) for batch in straggler_batches]
-        generated_headings = self.llm.generate_headings_from_sentences(sampled_contents)
+        generated_headings = self.llm.generate_headings_batch(sampled_contents)
 
         batch_nodes = []
         for batch, heading_text in zip(straggler_batches, generated_headings):
@@ -278,10 +308,28 @@ class SemanticReconciler:
         all_cust_nodes = main_tree_branches + pruned_nodes
         
         all_matched_nodes = set(node_heading_pairs.keys())
-        new_cust_nodes = [n for n in all_cust_nodes if n not in all_matched_nodes]
-        
-        return new_cust_nodes, all_cust_nodes
+        live_render_nodes = [n for n in root.apply(lambda n: n) if n.has_embedding]
+        all_render_nodes = self.deduplicate_by_ancestry(live_render_nodes + pruned_nodes)
 
+        # New ones = not in DB yet (no match found)
+        new_cust_nodes = [n for n in all_render_nodes if n not in all_matched_nodes]
+
+        return new_cust_nodes, all_render_nodes
+
+def find_closest_cosine_sim(query_vec,list_vecs)->tuple[int,float]:
+    """
+    Standard vector math helper. Normalizes the vectors and calculates the dot product 
+    to find the most semantically similar heading in a list.
+    """
+    
+    # Force list_vecs to be 2D (rows, features)
+    if list_vecs.ndim == 1:
+        list_vecs = list_vecs[np.newaxis, :]
+    query_norm = query_vec / np.linalg.norm(query_vec)
+    list_norms = list_vecs / np.linalg.norm(list_vecs,axis=1)[:,np.newaxis]
+    similarities = np.dot(list_norms,query_norm)
+    closest_idx = np.argmax(similarities)
+    return closest_idx,similarities[closest_idx]
 
 if __name__ == "__main__": 
     pass

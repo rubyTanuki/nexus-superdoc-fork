@@ -18,6 +18,10 @@ from langchain_openai import ChatOpenAI
 from lexical.lexical_algs import extract_text_similarity_jaccard
 from googledoc.googledoc import GoogleDocsEditor
 
+
+
+from typing import List
+
 from pdf_pipeline.etree import EmbedTreeNode
 from io import BytesIO
 '''
@@ -27,6 +31,15 @@ And also do cosine similarity search efficently
 In order to do the superdoc comparison alg properly
 
 '''
+class DB_Heading(BaseModel):
+        """Schema for headings retrieved from Pinecone/Database.""" 
+        id: str 
+        heading: Optional[str]
+        position: Optional[int]
+        embedding: List[float]
+
+
+
 
 class VectorDBManager(BaseModel):
     """
@@ -285,7 +298,7 @@ class VectorDBManager(BaseModel):
             return "Basic"
 
 
-    def get_all_headings_for_doc(self, course_id: str, superdoc_id: str) -> list[dict]:
+    def get_all_headings_for_doc(self, course_id: str, superdoc_id: str) -> list[DB_Heading]:
         """
         Retrieves all heading entries associated with a specific superdoc_id 
         within a course namespace.
@@ -309,17 +322,22 @@ class VectorDBManager(BaseModel):
             # Extract just the metadata/values into a clean list
             headings = []
             for match in response.get("matches", []):
-                headings.append({
-                    "id": match.id,
-                    "heading": match.metadata.get("heading"),
-                    "position": match.metadata.get("position"),
-                    "embedding": match.values
-                })
+                headings.append(
+                    DB_Heading(
+                        id=match.id,
+                        heading=match.metadata.get("heading"),
+                        position=match.metadata.get("position"), 
+                        embedding=match.values
+                        )
+                    )
+                
                 
             return headings
     
         except Exception as e:
             print(f"Error fetching headings: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
 

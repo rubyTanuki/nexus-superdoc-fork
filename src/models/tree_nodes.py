@@ -6,7 +6,7 @@ from mistletoe.span_token import SpanToken, RawText
 
 class EmbedTreeNode:
 
-    __slots__ = ['node', 'type', 'parent', 'children', 'block_len', 'embedding', 'level', 'is_custom_node', 'is_pruned']
+    __slots__ = ['node', 'type', 'parent', 'children', 'block_len', 'embedding','mean_emb','level', 'is_custom_node', 'is_pruned', "has_embedding"]
 
     def __init__(self, mistletoe_token, level=None):
         self.node = mistletoe_token
@@ -18,8 +18,10 @@ class EmbedTreeNode:
         
         # Pipeline State
         self.embedding = None       # 1536-dim vector
+        self.mean_emb = self.embedding
         self.is_custom_node = False # True if injected by LLM
         self.is_pruned = False
+        self.has_embedding  = False
         self.block_len = 0          # Word count for subtree
 
     @property

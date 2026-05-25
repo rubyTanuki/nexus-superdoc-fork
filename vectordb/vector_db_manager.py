@@ -18,6 +18,9 @@ from langchain_openai import ChatOpenAI
 from lexical.lexical_algs import extract_text_similarity_jaccard
 from googledoc.googledoc import GoogleDocsEditor
 
+
+
+from typing import List
 from pdf_pipeline.etree import EmbedTreeNode
 from io import BytesIO
 '''

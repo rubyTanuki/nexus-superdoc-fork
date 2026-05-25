@@ -105,13 +105,7 @@ def test_pdf_structure(file_path):
 
     COURSE_ID = "Goof1202"
     DOCUMENT_ID = "1Q1whz1kFN9wj1_mamWgaDbKh7przNmc5owdOSNovC04"
-    existing_headings = [
-    DB_Heading(**h) for h in vec_db.get_all_headings_for_doc(
-        course_id=COURSE_ID,
-        superdoc_id=DOCUMENT_ID
-    )
-    if h.get("embedding") and len(h["embedding"]) == 1536
-]
+    existing_headings =  vec_db.get_all_headings_for_doc(course_id=COURSE_ID,superdoc_id=DOCUMENT_ID)
     print(f"Fetched {len(existing_headings)} existing headings from DB.")
 
     # Run merge / reconciliation
