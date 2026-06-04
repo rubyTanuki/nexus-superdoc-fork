@@ -16,7 +16,6 @@ from langchain_core.documents import Document
 import re
 from langchain_openai import ChatOpenAI
 from lexical.lexical_algs import extract_text_similarity_jaccard
-from googledoc.googledoc import GoogleDocsEditor
 
 
 

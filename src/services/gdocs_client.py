@@ -14,13 +14,14 @@ from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
 from langchain_core.documents import Document
 
-from pdf_pipeline.etree import EmbedTreeNode
-from pdf_pipeline.gdoctree import GdocTreeNode
+from src.models.tree_nodes import EmbedTreeNode
+from src.core.gdocs_renderer import GdocTreeBuilder
+#from pdf_pipeline.gdoctree import GdocTreeNode
 from io import BytesIO
 
 from collections import defaultdict
 
-from dynamodb.dynamodb import append_to_course_docs, fetch_all_course_docs
+#from dynamodb.dynamodb import append_to_course_docs, fetch_all_course_docs
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/documents","https://www.googleapis.com/auth/drive.file"] # Use full scope like 'https://www.googleapis.com/auth/documents' for write operations
 
@@ -671,6 +672,135 @@ class GoogleDocsEditor(GoogleDocsAPI):
         self.get_document_structure(document_id=document_id) 
         #named_ranges = document.get("namedRanges",{})
     
+
+
+    def render_trees(self, superdoc_id: str, all_render_nodes: list[EmbedTreeNode], node_heading_pairs: dict):
+        """
+        The main rendering pipeline (new architecture).
+        1. Extracts headings from each render node's root content.
+        2. Ensures those headings exist in the Doc.
+        3. Builds GdocTrees per render node via GdocTreeBuilder.
+        4. Generates batched text and formatting requests.
+        5. Executes a massive batchUpdate to sync content into the Google Doc sections.
+        """
+        print(f"Connecting to Google Doc: {superdoc_id}")
+        self.get_document_structure(document_id=superdoc_id)
+
+        # Each render node's heading is either its matched heading (from node_heading_pairs)
+        # or its own content if unmatched (new heading)
+        headings = []
+        for node in all_render_nodes:
+            matched = node_heading_pairs.get(node)
+            heading = matched if matched else (node.content.strip() if node.content else None)
+            headings.append(heading)
+
+        headings_reversed = list(reversed(headings))
+        print(f"RECEIVED HEADINGS: {headings_reversed}")
+        self.create_headings(headings_reversed)
+        self.get_document_structure(document_id=superdoc_id)
+
+        ranges = [self.find_named_range(heading) for heading in headings_reversed]
+        ranges.reverse()
+        print(f"Ranges: {ranges}")
+
+        # Debug: log each render node
+        for i, node in enumerate(all_render_nodes):
+            print(f"Render Node {i} type: {node.type}, children count: {len(node.children)}")
+
+        # Build a GdocTree per render node
+        gdoc_branches = []
+        gdoc_builders = []
+        for i, render_node in enumerate(all_render_nodes):
+            # Mirror the stub-root pattern from test_render_to_gdocs
+            class _RootToken:
+                pass
+            stub_root = EmbedTreeNode(_RootToken(), 0)
+            stub_root.type = "ROOT"
+            stub_root.children = [render_node]
+
+            original_parent = render_node.parent
+            render_node.parent = stub_root
+
+            gdoc_builder = GdocTreeBuilder(start_index=1)
+            gdoc_root = gdoc_builder.build(stub_root, node_heading_pairs)
+
+            render_node.parent = original_parent  # restore
+
+            gdoc_branches.append(gdoc_root)
+            gdoc_builders.append(gdoc_builder)
+
+            print(f"GDOC Branch {i} type: {gdoc_root.type}, children count: {len(gdoc_root.children)}")
+
+        # Generate requests per branch, anchored to that branch's heading range
+        text_requests = []
+        format_requests = []
+        range_dict = {}
+        req_per_heading = defaultdict(list)
+
+        for gdoc_root, gdoc_builder, heading, range in zip(gdoc_branches, gdoc_builders, headings, ranges):
+            if heading in range_dict:
+                startIndex = range_dict[heading]['startIndex']
+                endIndex = range_dict[heading]['endIndex'] - 1
+            else:
+                startIndex = range['namedRanges'][0]['ranges'][0]['startIndex']
+                endIndex = range['namedRanges'][0]['ranges'][0]['endIndex']
+
+            print(f"\nGDOC BRANCH: {gdoc_root}\n")
+
+            # Collect all requests from this builder, re-anchored to endIndex
+            gdoc_builder.start_index = endIndex
+            branch_requests = gdoc_builder.collect_all_requests(gdoc_root)
+
+            # Split into text vs format requests (insertText vs everything else)
+            branch_text_requests = [r for r in branch_requests if 'insertText' in r]
+            branch_format_requests = [r for r in branch_requests if 'insertText' not in r]
+
+            text_len = sum(len(r['insertText']['text']) for r in branch_text_requests if 'insertText' in r)
+
+            req_per_heading[heading].append(branch_text_requests)
+            req_per_heading[heading].append(branch_format_requests)
+            text_requests.append(branch_text_requests)
+            format_requests.append(branch_format_requests)
+
+            range_dict[heading] = {
+                'startIndex': startIndex,
+                'endIndex': endIndex + text_len
+            }
+
+        text_requests = [req for req in text_requests if len(req) != 0]
+
+        sorted_heading_ranges = sorted(
+            range_dict.items(),
+            key=lambda x: x[1]['startIndex'],
+            reverse=True
+        )
+        print(f"Sorted heading ranges: {sorted_heading_ranges}")
+
+        text_and_format_requests = []
+        for (heading, heading_range) in sorted_heading_ranges:
+            startIndex = range_dict[heading]['startIndex']
+            endIndex = range_dict[heading]['endIndex']
+
+            for requests in req_per_heading[heading]:
+                text_and_format_requests.extend(requests)
+
+            text_and_format_requests.extend([
+                {'deleteNamedRange': {'name': heading}},
+                {
+                    'createNamedRange': {
+                        'name': heading,
+                        'range': {
+                            'startIndex': startIndex,
+                            'endIndex': max(startIndex + 1, endIndex - 1)
+                        }
+                    }
+                }
+            ])
+
+        print(f"Len of all requests: {len(text_and_format_requests)}")
+        self.batch_update(text_and_format_requests)
+        print(f"FINISHED BATCH UPDATE")
+
 
 
 
