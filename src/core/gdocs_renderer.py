@@ -221,21 +221,18 @@ class GdocTreeBuilder:
  
         gdoc_node.requests = requests
         self._cursor += text_len
- 
+    
     def _gen_table(self, gdoc_node: GdocTreeNode, depth: int) -> None:
-        """
-        Builds a native Google Docs table from the EmbedTreeNode's content.
-        Parses rows/cells out of the mistletoe Table token directly.
-        """
         table_data = _extract_table_data(gdoc_node.node.node)
         if not table_data:
             return
- 
+
         num_rows = len(table_data)
         num_cols = max(len(row) for row in table_data)
         start = self._cursor
- 
-        requests = [
+
+        # Phase 1: Structure creation request goes inline with main text layout
+        create_request = [
             {
                 "insertTable": {
                     "rows": num_rows,
@@ -244,23 +241,24 @@ class GdocTreeBuilder:
                 }
             }
         ]
- 
-        # After insertTable the cursor advances by (rows * cols * 2) + 2
-        # then we fill each cell
-        cell_cursor = start + 1
+
+        fill_requests = []
+        # Target cells relative to a clean, empty table structure layout
+        cell_cursor = start + 2
+
         for r_idx, row in enumerate(table_data):
-            for cell_text in row:
+            padded_row = row + [""] * (num_cols - len(row))
+            for cell_text in padded_row:
                 if cell_text:
                     cell_len = _utf16_len(cell_text)
-                    requests.append({
+                    fill_requests.append({
                         "insertText": {
                             "location": {"index": cell_cursor},
                             "text": cell_text,
                         }
                     })
-                    # Bold the header row
                     if r_idx == 0:
-                        requests.append({
+                        fill_requests.append({
                             "updateTextStyle": {
                                 "range": {
                                     "startIndex": cell_cursor,
@@ -270,14 +268,17 @@ class GdocTreeBuilder:
                                 "fields": "bold",
                             }
                         })
-                    cell_cursor += cell_len
-                cell_cursor += 2  # cell boundary tokens
- 
-        total_text_len = sum(_utf16_len(c) for row in table_data for c in row)
-        total_offset = (num_rows * num_cols * 2) + 2 + total_text_len
- 
-        gdoc_node.requests = requests
-        self._cursor += total_offset
+                cell_cursor += 1  # Step past empty cell token slot
+            cell_cursor += 1  # Step past row end token slot
+
+        # The precise index footprint of an empty table structure
+        empty_table_offset = 1 + (num_rows * num_cols) + num_rows + 1
+
+        # Keep creation inline with standard text flows; defer fill payloads
+        gdoc_node.requests = create_request
+        gdoc_node._table_fill = fill_requests
+
+        self._cursor += empty_table_offset
  
     def _gen_quote(self, gdoc_node: GdocTreeNode, depth: int) -> None:
         """
@@ -327,15 +328,18 @@ class GdocTreeBuilder:
             return "ORDERED"
         return "BULLET"
  
-    def collect_all_requests(self, gdoc_root: GdocTreeNode) -> list[dict]:
-        """
-        Flattens all requests from every node in document order.
-        Convenience method for handing the full list to the Docs API.
-        """
-        all_requests = []
+    def collect_all_requests(self, gdoc_root: GdocTreeNode) -> tuple[list[dict], list[dict]]:
+        """Returns (main_structural_requests, table_fill_requests)"""
+        main_requests = []
+        table_fills = []
+    
         for node in gdoc_root.apply(lambda n: n):
-            all_requests.extend(node.requests)
-        return all_requests
+            if hasattr(node, 'requests') and node.requests:
+                main_requests.extend(node.requests)
+            if hasattr(node, '_table_fill') and node._table_fill:
+                table_fills.extend(node._table_fill)
+    
+        return main_requests, table_fills
  
  
 # ---------------------------------------------------------------------------
@@ -355,25 +359,34 @@ def _extract_text(token) -> str:
  
  
 def _extract_table_data(token) -> list[list[str]]:
-    """
-    Pulls a 2-D list of strings from a mistletoe Table token.
-    Skips the markdown separator row (cells containing only dashes).
-    """
     if not hasattr(token, 'children'):
         return []
- 
+
     rows = []
+
+    # mistletoe stores the header row separately on token.header
+    header = getattr(token, 'header', None)
+    if header and hasattr(header, 'children'):
+        cells = []
+        for cell in header.children:
+            text = _extract_text(cell).strip()
+            if not all(c in "- " for c in text):
+                cells.append(text)
+        if cells:
+            rows.append(cells)
+
+    # Body rows are in token.children
     for row_token in token.children:
         if not hasattr(row_token, 'children'):
             continue
         cells = []
         for cell in row_token.children:
             text = _extract_text(cell).strip()
-            # Skip separator rows like "---"
             if all(c in "- " for c in text):
                 break
             cells.append(text)
         if cells:
             rows.append(cells)
+
     return rows
  

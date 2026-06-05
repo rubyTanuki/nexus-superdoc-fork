@@ -331,7 +331,138 @@ def test_render_to_gdocs2(file_path):
     print(f"\n--- render_trees() complete ---")
 
 
-    
+def test_table_structure(file_path):
+    """
+    Isolates and prints everything about how a PDF's table flows through
+    the pipeline: mistletoe token structure, EmbedTree, and GdocTree requests.
+    """
+    import pymupdf
+    import pymupdf4llm
+    import mistletoe
+
+    print("=" * 60)
+    print("STEP 1: RAW MARKDOWN")
+    print("=" * 60)
+    doc = pymupdf.open(file_path)
+    md_text = pymupdf4llm.to_markdown(doc, force_markdown=True)
+    print(md_text)
+
+    print("=" * 60)
+    print("STEP 2: MISTLETOE TOKEN TREE (raw parse)")
+    print("=" * 60)
+    mistletoe_doc = mistletoe.Document(md_text)
+
+    def print_mistletoe_tree(token, indent=0):
+        prefix = "  " * indent
+        cls = token.__class__.__name__
+        content = ""
+        if hasattr(token, 'content') and token.content:
+            content = f" | content={repr(token.content[:60])}"
+        children = getattr(token, 'children', None) or []
+        print(f"{prefix}[{cls}]{content} ({len(children)} children)")
+        for child in children:
+            print_mistletoe_tree(child, indent + 1)
+
+    print_mistletoe_tree(mistletoe_doc)
+
+    print("=" * 60)
+    print("STEP 3: TABLE TOKEN DEEP DIVE")
+    print("=" * 60)
+
+    def find_tables(token, path="root"):
+        cls = token.__class__.__name__
+        if cls == "Table":
+            print(f"\nFound Table at: {path}")
+            print(f"  children count (rows): {len(getattr(token, 'children', []))}")
+            for r_idx, row in enumerate(getattr(token, 'children', [])):
+                row_cls = row.__class__.__name__
+                cells = getattr(row, 'children', [])
+                print(f"  Row {r_idx} [{row_cls}] — {len(cells)} cells")
+                for c_idx, cell in enumerate(cells):
+                    cell_cls = cell.__class__.__name__
+                    # Try to extract text from cell
+                    def _text(t):
+                        from mistletoe.span_token import RawText
+                        if isinstance(t, RawText): return t.content
+                        kids = getattr(t, 'children', None) or []
+                        return " ".join(_text(k) for k in kids)
+                    text = _text(cell)
+                    print(f"    Cell [{c_idx}] [{cell_cls}] text={repr(text)}")
+        for child in getattr(token, 'children', []) or []:
+            find_tables(child, path + f">{child.__class__.__name__}")
+
+    find_tables(mistletoe_doc)
+
+    print("=" * 60)
+    print("STEP 4: EMBED TREE (SemanticTreeBuilder output)")
+    print("=" * 60)
+
+
+    with SemanticTreeBuilder() as builder:
+        nested_tree = builder.render(mistletoe_doc)
+
+    def print_embed_tree(node, indent=0):
+        prefix = "  " * indent
+        content_preview = ""
+        if node.content:
+            content_preview = f" | {repr(node.content.strip()[:60])}"
+        print(f"{prefix}[{node.type}] level={node.level}{content_preview} ({len(node.children)} children)")
+        for child in node.children:
+            print_embed_tree(child, indent + 1)
+
+    print_embed_tree(nested_tree)
+
+    print("=" * 60)
+    print("STEP 5: GDOC REQUESTS FOR TABLE NODE")
+    print("=" * 60)
+
+    # Find the TABLE embed node
+    def find_embed_tables(node, results=None):
+        if results is None: results = []
+        if node.type == "TABLE":
+            results.append(node)
+        for child in node.children:
+            find_embed_tables(child, results)
+        return results
+
+    table_nodes = find_embed_tables(nested_tree)
+    print(f"Found {len(table_nodes)} TABLE node(s) in EmbedTree")
+
+    for i, table_node in enumerate(table_nodes):
+        print(f"\n--- Table {i+1} ---")
+        print(f"  content preview: {repr(table_node.content[:100])}")
+
+        # Build a minimal stub tree with just this table node
+        stub_root = object.__new__(EmbedTreeNode)
+        stub_root.type = "ROOT"
+        stub_root.node = None
+        stub_root.level = 0
+        stub_root.parent = None
+        stub_root.children = [table_node]
+        stub_root.embedding = None
+        stub_root.mean_emb = None
+        stub_root.is_custom_node = False
+        stub_root.is_pruned = False
+        stub_root.has_embedding = False
+        stub_root.block_len = 0
+
+        builder = GdocTreeBuilder(start_index=1)
+        gdoc_root = builder.build(stub_root, {})
+
+        requests = builder.collect_all_requests(gdoc_root)
+        print(f"  Total requests generated: {len(requests)}")
+        for j, req in enumerate(requests):
+            req_type = list(req.keys())[0]
+            details = req[req_type]
+            print(f"  [{j+1}] {req_type}")
+            if req_type == "insertTable":
+                print(f"        rows={details['rows']} cols={details['columns']} at index={details['location']['index']}")
+            elif req_type == "insertText":
+                print(f"        text={repr(details['text'])} at index={details['location']['index']}")
+            elif req_type == "updateTextStyle":
+                r = details['range']
+                print(f"        range=[{r['startIndex']},{r['endIndex']}] style={details['textStyle']}")
+
 
 if __name__ == "__main__":
     # Change this to your actual file path
