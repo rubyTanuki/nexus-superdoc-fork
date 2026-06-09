@@ -432,13 +432,13 @@ class superdoc():
         return ""
     
 if __name__ == '__main__': 
-    with open("files/Chloroplasts 1.pdf", "rb") as f:
+    with open("files/basic-text.pdf", "rb") as f:
         pdf_bytes = f.read()
     strm = BytesIO(pdf_bytes)
 
     sd = superdoc(DOCUMENT_ID='1Q1whz1kFN9wj1_mamWgaDbKh7przNmc5owdOSNovC04',COURSE_ID="Goof1202")
-    #sd.merge_pdf_hierarchical(stream=strm)
-    sd.sync_headings()
+    sd.merge_pdf_hierarchical(stream=strm)
+    #sd.sync_headings()
     #sd.create_document(name="Hellow",course_id="RHET1302")
     #sd.merge_pdf()
    # sd.update_heading(old_heading="Introduction",new_heading="GoofyGoober")

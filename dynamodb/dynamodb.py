@@ -12,9 +12,9 @@ def test():
     #print(f"Using Access Key: {current_credentials.access_key}")
 
 
-dynamodb = boto3.resource('dynamodb')
-TABLE_NAME = os.getenv("DYNAMO_TABLE", "NEXUS-superdoc-id-store")#'NEXUS-superdoc-id-store'#docidstore'
-table = dynamodb.Table(TABLE_NAME)
+#dynamodb = boto3.resource('dynamodb')
+#TABLE_NAME = os.getenv("DYNAMO_TABLE", "NEXUS-superdoc-id-store")#'NEXUS-superdoc-id-store'#docidstore'
+#table = dynamodb.Table(TABLE_NAME)
 
 def save_course_docs(courseId, doc_ids):
     """Creates or completely overwrites a course entry with a list of doc IDs."""

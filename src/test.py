@@ -7,7 +7,7 @@ import mistletoe
 from mistletoe.block_token import BlockToken, Heading, Paragraph
 from mistletoe.span_token import SpanToken, RawText
 
-from src.models.tree_nodes import EmbedTreeNode
+from src.models.tree_nodes import EmbedTreeNode, GdocTreeNode
 from src.core.semantic_renderer import SemanticTreeBuilder
 from src.core.gdocs_renderer import GdocTreeBuilder
 from src.core.merge_algs import TreeEmbedder, SemanticReconciler, DB_Heading
@@ -340,6 +340,10 @@ def test_table_structure(file_path):
     import pymupdf4llm
     import mistletoe
 
+    from mistletoe import Document
+    from mistletoe.span_token import SpanToken, add_token
+    from src.models.tokens import InlineMath
+
     print("=" * 60)
     print("STEP 1: RAW MARKDOWN")
     print("=" * 60)
@@ -350,6 +354,7 @@ def test_table_structure(file_path):
     print("=" * 60)
     print("STEP 2: MISTLETOE TOKEN TREE (raw parse)")
     print("=" * 60)
+    add_token(InlineMath)
     mistletoe_doc = mistletoe.Document(md_text)
 
     def print_mistletoe_tree(token, indent=0):
@@ -462,6 +467,233 @@ def test_table_structure(file_path):
             elif req_type == "updateTextStyle":
                 r = details['range']
                 print(f"        range=[{r['startIndex']},{r['endIndex']}] style={details['textStyle']}")
+
+def print_detailed_tree(node, indent: str = "", is_last: bool = True) -> None:
+    """
+    Recursively prints a highly detailed, cascading terminal visualization 
+    of either an EmbedTreeNode or a GdocTreeNode structure, fully expanding
+    paragraphs into their individual nested inline style and raw-text children.
+    """
+    if node is None:
+        return
+
+    # Determine Unicode tree branches for clean layout alignment
+    marker = "└── " if is_last else "├── "
+    next_indent = indent + ("    " if is_last else "│   ")
+
+    # 1. Handle Class Type Identification
+    node_type = getattr(node, "type", "Unknown")
+    
+    # Extract the underlying data item depending on the wrapper type
+    if hasattr(node, "node") and hasattr(node.node, "node"):
+        # GdocTreeNode -> EmbedTreeNode -> Mistletoe Token
+        mistletoe_token = node.node.node
+    elif hasattr(node, "node"):
+        # EmbedTreeNode -> Mistletoe Token
+        mistletoe_token = node.node
+    else:
+        mistletoe_token = node
+
+    token_class = mistletoe_token.__class__.__name__ if mistletoe_token else "Container"
+
+    # 2. Gather Node Attributes / Flags
+    extra_details = []
+    if hasattr(node, "level") and node.level is not None:
+        extra_details.append(f"Lvl: {node.level}")
+    if getattr(node, "matched_heading", None):
+        extra_details.append(f"MATCH: '{node.matched_heading}'")
+    if hasattr(node, "requests") and node.requests:
+        extra_details.append(f"Reqs: {len(node.requests)}")
+
+    details_str = f" [{', '.join(extra_details)}]" if extra_details else ""
+
+    # 3. Handle Content Snippets Safely
+    # If it's an explicit text leaf or math leaf, capture its content directly
+    raw_content = getattr(mistletoe_token, "content", "")
+    if not raw_content and hasattr(node, "content"):
+        raw_content = node.content
+        
+    content_snippet = repr(raw_content.strip()[:60]) if (raw_content and raw_content.strip()) else ""
+
+    # Print the current node branch row
+    print(f"{indent}{marker}[{node_type} ({token_class})]{details_str} {content_snippet}")
+
+    # 4. Process Children Arrays (Cascading downward)
+    # Collect both structural tree children AND inline Mistletoe span children
+    children_to_process = []
+    
+    # Add structural block children (from EmbedTreeNode / GdocTreeNode layout)
+    if hasattr(node, "children") and node.children:
+        children_to_process.extend(node.children)
+        
+
+
+    child_count = len(children_to_process)
+    for i, child in enumerate(children_to_process):
+        print_detailed_tree(child, next_indent, is_last=(i == child_count - 1))
+
+
+
+def print_mistletoe_tree(token, indent=0):
+    prefix = "  " * indent
+    cls = token.__class__.__name__
+    content = ""
+    
+    if cls == "List":
+        list_type = "ORDERED_LIST" if token.start is not None else "UNORDERED_LIST"
+        print(f"{prefix}[{list_type}] start={token.start} ({len(token.children)} children)")
+    elif cls == "ListItem":
+        print(f"{prefix}[LIST_ITEM] leader={token.leader} loose={token.loose}")
+    else:
+        if hasattr(token, 'content') and token.content:
+            content = f" | content={repr(token.content[:60])}"
+        children = getattr(token, 'children', None) or []
+        print(f"{prefix}[{cls}]{content} ({len(children)} children)")
+
+    for child in getattr(token, 'children', None) or []:
+        print_mistletoe_tree(child, indent + 1)
+
+
+
+def test_show_structure(file_path):
+    """
+    Diagnostic runner that processes a PDF file through the parser 
+    and displays the cascading structural tree in the terminal.
+    """
+    print(f"\n" + "=" * 60)
+    print(f"--- Visual Structural Audit for: {file_path} ---")
+    print(f"=" * 60)
+ 
+    # 1. Convert PDF to Markdown
+    import pymupdf
+    import pymupdf4llm
+    import mistletoe
+    
+    doc = pymupdf.open(file_path)
+    md_text = pymupdf4llm.to_markdown(doc, force_markdown=True)
+    
+    print('\n[Step 1] Extracted Raw Markdown Snippet:')
+    print("-" * 40)
+    # Print just the first 500 characters to keep stdout clear
+    print(md_text[:500] + ("\n... [Truncated for preview] ..." if len(md_text) > 500 else ""))
+    print("-" * 40)
+ 
+    # 2. Build the Initial Mistletoe AST and Semantic Tree
+    # Ensure mistletoe.Document.insert_plugin(InlineMath) happened somewhere globally
+    mistletoe_doc = mistletoe.Document(md_text)
+    
+    print("\n[Step 2] Building Semantic Stack Tree...")
+    with SemanticTreeBuilder() as builder:
+        nested_tree = builder.render(mistletoe_doc)
+ 
+    gdoc_builder = GdocTreeBuilder(start_index=1)
+
+    gdoc_tree = gdoc_builder.build(nested_tree,{})
+    print("\n[Step 3] Detailed Structural Output:")
+    print("-" * 40)
+    print_gdoc_tree(gdoc_tree)
+    print("-" * 40)
+    print(f"\n--- Diagnostic Audit Complete ---\n")
+
+
+def check_math_in_pdf(file_path: str, preview_chars: int = 3000) -> str:
+    """
+    Extracts markdown from a PDF and checks for inline math ($...$).
+    
+    Args:
+        file_path: Path to the PDF file.
+        preview_chars: How many characters of markdown to preview.
+    
+    Returns:
+        The full extracted markdown string.
+    """
+    import pymupdf
+    import pymupdf4llm
+
+    doc = pymupdf.open(file_path)
+    md = pymupdf4llm.to_markdown(doc, force_markdown=True)
+
+    dollar_count = md.count('$')
+    print(f"Total '$' signs found: {dollar_count}")
+    print(f"InlineMath will {'FIRE' if dollar_count >= 2 else 'NOT fire'} on this PDF\n")
+    print("=" * 60)
+    print(f"MARKDOWN PREVIEW (first {preview_chars} chars)")
+    print("=" * 60)
+    print(md[:preview_chars])
+
+    return md
+
+
+
+def print_gdoc_tree(gdoc_root: GdocTreeNode, indent: int = 0) -> None:
+    """
+    Prints the GdocTree with each node's type, content preview,
+    and the Google Docs requests it will generate.
+    """
+    prefix = "  " * indent
+    node_type = getattr(gdoc_root, 'type', '?')
+    content = getattr(gdoc_root, 'content', '') or ''
+    content_preview = repr(content.strip()[:50]) if content.strip() else ''
+
+    print(f"{prefix}[{node_type}] {content_preview}")
+
+    # Print requests attached to this node
+    requests = getattr(gdoc_root, 'requests', []) or []
+    table_fill = getattr(gdoc_root, '_table_fill', []) or []
+
+    for req in requests:
+        req_type = list(req.keys())[0]
+        details = req[req_type]
+        _print_request(req_type, details, prefix + "  ")
+
+    if table_fill:
+        print(f"{prefix}  [TABLE_FILL]")
+        for req in table_fill:
+            req_type = list(req.keys())[0]
+            details = req[req_type]
+            _print_request(req_type, details, prefix + "    ")
+
+    for child in getattr(gdoc_root, 'children', []) or []:
+        print_gdoc_tree(child, indent + 1)
+
+
+def _print_request(req_type: str, details: dict, prefix: str) -> None:
+    if req_type == "insertText":
+        text = details.get('text', '')
+        idx = details.get('location', {}).get('index', '?')
+        print(f"{prefix}→ insertText       @ {idx:<6} {repr(text[:40])}")
+
+    elif req_type == "insertTable":
+        idx = details.get('location', {}).get('index', '?')
+        rows = details.get('rows', '?')
+        cols = details.get('columns', '?')
+        print(f"{prefix}→ insertTable      @ {idx:<6} [{rows}x{cols}]")
+
+    elif req_type == "insertInlineImage":
+        idx = details.get('location', {}).get('index', '?')
+        uri = details.get('uri', '')[:40]
+        print(f"{prefix}→ insertImage      @ {idx:<6} {uri}")
+
+    elif req_type == "updateTextStyle":
+        r = details.get('range', {})
+        style = details.get('textStyle', {})
+        print(f"{prefix}→ updateTextStyle  @ [{r.get('startIndex','?')},{r.get('endIndex','?')}] {style}")
+
+    elif req_type == "updateParagraphStyle":
+        r = details.get('range', {})
+        style = details.get('paragraphStyle', {})
+        named = style.get('namedStyleType', '')
+        indent_start = style.get('indentStart', {}).get('magnitude', '')
+        print(f"{prefix}→ updateParaStyle  @ [{r.get('startIndex','?')},{r.get('endIndex','?')}] {named} indent={indent_start}")
+
+    elif req_type == "createParagraphBullets":
+        r = details.get('range', {})
+        preset = details.get('bulletPreset', '?')
+        print(f"{prefix}→ createBullets    @ [{r.get('startIndex','?')},{r.get('endIndex','?')}] {preset}")
+
+    else:
+        print(f"{prefix}→ {req_type}")
+
 
 
 if __name__ == "__main__":

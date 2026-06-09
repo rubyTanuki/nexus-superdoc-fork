@@ -1,11 +1,10 @@
+import io
+import matplotlib.pyplot as plt
 from mistletoe.block_token import BlockToken, List as MistletoeList, Table, Heading, Paragraph, ListItem
 from mistletoe.span_token import SpanToken, RawText, Strong, Emphasis
 
 from src.models.tree_nodes import EmbedTreeNode, GdocTreeNode, _utf16_len
 
-
- 
- 
 # ---------------------------------------------------------------------------
 # Heading level → Google Docs named style
 # ---------------------------------------------------------------------------
@@ -27,11 +26,6 @@ class GdocTreeBuilder:
     Walks an EmbedTree (output of SemanticTreeBuilder + reconcile_structure)
     and produces a GdocTree where every node carries the Google Docs
     BatchUpdate requests needed to render its content.
- 
-    Usage:
-        builder = GdocTreeBuilder(start_index=1)
-        gdoc_root = builder.build(embed_root, matched_nodes)
-        # gdoc_root.apply(lambda n: n.requests) → all requests in tree order
     """
  
     def __init__(self, start_index: int = 1):
@@ -41,6 +35,12 @@ class GdocTreeBuilder:
         where to insert relative to what came before.
         """
         self._cursor = start_index
+        self.api = None
+        self._temp_drive_files = []
+
+    def set_google_api(self, api_wrapper):
+        """Pass your initialized GoogleDocsAPI instance into the renderer."""
+        self.api = api_wrapper
  
     # ------------------------------------------------------------------
     # Public API
@@ -51,14 +51,6 @@ class GdocTreeBuilder:
         embed_root: EmbedTreeNode,
         matched_nodes: dict[EmbedTreeNode, str],
     ) -> GdocTreeNode:
-        """
-        Recursively mirrors the EmbedTree into a GdocTree and populates
-        each node's `requests` list in document order.
- 
-        embed_root    : the ROOT EmbedTreeNode from SemanticTreeBuilder
-        matched_nodes : node_heading_pairs from reconcile_structure
-                        { EmbedTreeNode → db_heading_label }
-        """
         class _RootToken:
             pass
  
@@ -85,10 +77,6 @@ class GdocTreeBuilder:
         depth: int,
         list_mode: str | None = None,   # "BULLET" | "ORDERED" | None
     ) -> None:
-        """
-        Creates a GdocTreeNode for embed_node, generates its requests,
-        attaches it to gdoc_parent, then recurses into children.
-        """
         gdoc_node = GdocTreeNode(embed_node)
         gdoc_node.matched_heading = matched_nodes.get(embed_node)
         gdoc_parent.add_child(gdoc_node)
@@ -97,42 +85,36 @@ class GdocTreeBuilder:
  
         if node_type == "Heading":
             self._gen_heading(gdoc_node, depth)
-            # Recurse into children (sub-headings / paragraphs under this heading)
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth + 1, list_mode)
  
         elif node_type == "PARA":
             self._gen_paragraph(gdoc_node, depth, list_mode)
-            # Paragraphs are leaves — no further recursion needed
  
         elif node_type == "LIST":
-            # Determine bullet vs ordered from the underlying mistletoe token
             mode = self._list_mode(embed_node)
-            # LIST itself emits no text; children (PARA leaves) do
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, mode)
- 
+
+        elif node_type == "LIST_ITEM":  # add this branch
+            for child in embed_node.children:
+                self._visit(child, gdoc_node, matched_nodes, depth, list_mode)  # pass through
+        
         elif node_type == "TABLE":
             self._gen_table(gdoc_node, depth)
-            # Tables are treated as a single atomic block
  
         elif node_type == "QUOTE":
             self._gen_quote(gdoc_node, depth)
  
         else:
-            # Unknown structural container — just recurse
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, list_mode)
  
     # ------------------------------------------------------------------
-    # Request generators  (each mutates self._cursor)
+    # Request generators (each mutates self._cursor)
     # ------------------------------------------------------------------
  
     def _gen_heading(self, gdoc_node: GdocTreeNode, depth: int) -> None:
-        """
-        Inserts heading text and applies the matching HEADING_N paragraph style.
-        depth 0 → HEADING_1, depth 1 → HEADING_2, etc. (capped at 6).
-        """
         text = gdoc_node.content.strip() + "\n"
         text_len = _utf16_len(text)
         start = self._cursor
@@ -140,14 +122,12 @@ class GdocTreeBuilder:
         style_name = _HEADING_STYLE.get(min(depth + 1, 6), "HEADING_6")
  
         gdoc_node.requests = [
-            # 1. Insert the text
             {
                 "insertText": {
                     "location": {"index": start},
                     "text": text,
                 }
             },
-            # 2. Apply heading paragraph style
             {
                 "updateParagraphStyle": {
                     "range": {"startIndex": start, "endIndex": start + text_len},
@@ -166,33 +146,68 @@ class GdocTreeBuilder:
         list_mode: str | None,
     ) -> None:
         """
-        Inserts paragraph / list-item text with correct indentation.
-        If list_mode is set, also attaches a bullet/numbering preset.
+        Inserts block text and images sequentially, updating styles and 
+        paragraph metrics without breaking the character flow layout.
         """
-        raw = _extract_text(gdoc_node.node.node).strip()
-        if not raw:
+        token_source = gdoc_node.node.node
+        runs = self._extract_styled_runs(token_source)
+        if not runs:
             return
  
-        # List items get a single newline; body text gets double for spacing
-        text = raw + "\n" if list_mode else raw + "\n\n"
-        text_len = _utf16_len(text)
-        start = self._cursor
+        suffix = "\n" if list_mode else "\n\n"
+        start_index = self._cursor
+        requests = []
  
+        # Loop over every style span run inside the paragraph
+        for text_segment, style in runs:
+            if not text_segment:
+                continue
+ 
+            if style.get("is_math"):
+                formula = text_segment.strip("$")
+                math_req = self._insert_inline_math_image(formula, self._cursor)
+                requests.append(math_req)
+                self._cursor += 1  # Inline assets count as exactly 1 unit space
+            else:
+                seg_len = _utf16_len(text_segment)
+                requests.append({
+                    "insertText": {
+                        "location": {"index": self._cursor},
+                        "text": text_segment,
+                    }
+                })
+ 
+                # Separate out text styling parameters from custom engine tracking flags
+                text_styles = {k: v for k, v in style.items() if k != "is_math"}
+                if text_styles:
+                    requests.append({
+                        "updateTextStyle": {
+                            "textStyle": text_styles,
+                            "fields": ",".join(text_styles.keys()),
+                            "range": {
+                                "startIndex": self._cursor,
+                                "endIndex": self._cursor + seg_len
+                            }
+                        }
+                    })
+                self._cursor += seg_len
+ 
+        # Insert structural spacing suffix
+        suffix_len = _utf16_len(suffix)
+        requests.append({
+            "insertText": {
+                "location": {"index": self._cursor},
+                "text": suffix,
+            }
+        })
+        self._cursor += suffix_len
+        total_block_len = self._cursor - start_index
+ 
+        # Structural layout indents matching depth tree locations
         bullet_indent = depth * _INDENT_PT
         text_indent   = (depth + 1) * _INDENT_PT
- 
-        # For plain paragraphs both indents align
         if not list_mode:
             bullet_indent = text_indent
- 
-        requests = [
-            {
-                "insertText": {
-                    "location": {"index": start},
-                    "text": text,
-                }
-            },
-        ]
  
         if list_mode:
             preset = (
@@ -202,14 +217,14 @@ class GdocTreeBuilder:
             )
             requests.append({
                 "createParagraphBullets": {
-                    "range": {"startIndex": start, "endIndex": start + text_len},
+                    "range": {"startIndex": start_index, "endIndex": start_index + total_block_len},
                     "bulletPreset": preset,
                 }
             })
  
         requests.append({
             "updateParagraphStyle": {
-                "range": {"startIndex": start, "endIndex": start + text_len},
+                "range": {"startIndex": start_index, "endIndex": start_index + total_block_len},
                 "paragraphStyle": {
                     "namedStyleType": "NORMAL_TEXT",
                     "indentFirstLine": {"magnitude": bullet_indent, "unit": "PT"},
@@ -220,8 +235,7 @@ class GdocTreeBuilder:
         })
  
         gdoc_node.requests = requests
-        self._cursor += text_len
-    
+ 
     def _gen_table(self, gdoc_node: GdocTreeNode, depth: int) -> None:
         table_data = _extract_table_data(gdoc_node.node.node)
         if not table_data:
@@ -231,7 +245,6 @@ class GdocTreeBuilder:
         num_cols = max(len(row) for row in table_data)
         start = self._cursor
 
-        # Phase 1: Structure creation request goes inline with main text layout
         create_request = [
             {
                 "insertTable": {
@@ -243,7 +256,6 @@ class GdocTreeBuilder:
         ]
 
         fill_requests = []
-        # Target cells relative to a clean, empty table structure layout
         cell_cursor = start + 2
 
         for r_idx, row in enumerate(table_data):
@@ -268,22 +280,15 @@ class GdocTreeBuilder:
                                 "fields": "bold",
                             }
                         })
-                cell_cursor += 1  # Step past empty cell token slot
-            cell_cursor += 1  # Step past row end token slot
+                cell_cursor += 1  
+            cell_cursor += 1  
 
-        # The precise index footprint of an empty table structure
         empty_table_offset = 1 + (num_rows * num_cols) + num_rows + 1
-
-        # Keep creation inline with standard text flows; defer fill payloads
         gdoc_node.requests = create_request
         gdoc_node._table_fill = fill_requests
-
         self._cursor += empty_table_offset
  
     def _gen_quote(self, gdoc_node: GdocTreeNode, depth: int) -> None:
-        """
-        Renders a block quote as indented NORMAL_TEXT with a left margin.
-        """
         raw = gdoc_node.content.strip()
         if not raw:
             return
@@ -316,20 +321,108 @@ class GdocTreeBuilder:
         self._cursor += text_len
  
     # ------------------------------------------------------------------
-    # Helpers
+    # Math Rendering Engine Additions
     # ------------------------------------------------------------------
  
+    def _render_latex_to_bytes(self, formula: str) -> bytes:
+        """Compiles standard LaTeX syntax fields to high-fidelity transparent images."""
+        fig = plt.figure(figsize=(0.1, 0.1), dpi=300)
+        fig.text(0, 0, f"${formula}$", fontsize=11, usetex=False)
+        
+        buf = io.BytesIO()
+        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.02, transparent=True)
+        plt.close(fig)
+        return buf.getvalue()
+
+    def _insert_inline_math_image(self, formula_text: str, index: int) -> dict:
+        """Side-loads image data blocks directly into the execution drive path."""
+        if not self.api:
+            raise RuntimeError("GoogleDocsAPI instance missing. Use builder.set_google_api(api) before execution.")
+            
+        img_bytes = self._render_latex_to_bytes(formula_text)
+        uploaded_file = self.api.upload_image_bytes(img_bytes, filename=f"latex_{index}.png")
+        
+        image_url = uploaded_file.get("webContentLink")
+        file_id = uploaded_file.get("id")
+        self._temp_drive_files.append(file_id)
+
+        return {
+            "insertInlineImage": {
+                "uri": image_url,
+                "location": {"index": index},
+                "objectSize": {
+                    "height": {"magnitude": 13, "unit": "PT"}
+                }
+            }
+        }
+
+    def commit_and_cleanup_math(self, doc_id: str):
+        """Executes the batch request, then purges the temporary LaTeX files from Drive."""
+        if not self._temp_drive_files:
+            return
+            
+        print(f"Purging {len(self._temp_drive_files)} temporary equation assets from Drive...")
+        for file_id in self._temp_drive_files:
+            try:
+                self.api.drive_service.files().delete(fileId=file_id).execute()
+            except Exception as e:
+                print(f"Could not purge file {file_id}: {e}")
+        self._temp_drive_files.clear()
+
+    # ------------------------------------------------------------------
+    # Inline Runs & Token Traversal Engine
+    # ------------------------------------------------------------------
+ 
+    def _extract_styled_runs(self, token) -> list[tuple[str, dict]]:
+        """
+        Flattens complex nested formatting span trees into explicit sequence chunks.
+        Returns: list of (text_segment, style_dict)
+        """
+        runs = []
+        
+        def _walk(node, current_style: dict):
+            # Evaluate style maps matching class declarations
+            node_class = node.__class__.__name__
+            new_style = current_style.copy()
+            
+            match node_class:
+                case "Strong":        new_style["bold"] = True
+                case "Emphasis":      new_style["italic"] = True
+                case "Strikethrough": new_style["strikethrough"] = True
+                case "InlineMath":    new_style["is_math"] = True
+
+            if node_class == "RawText" or node_class == "InlineMath":
+                # Leaf fragments emit actual rendering strings
+                content = getattr(node, "content", "")
+                if content:
+                    runs.append((content, new_style))
+            elif hasattr(node, "children") and node.children:
+                for child in node.children:
+                    if child:
+                        _walk(child, new_style)
+            else:
+                content = getattr(node, "content", "")
+                if content:
+                    runs.append((content, new_style))
+
+        if hasattr(token, "children") and token.children:
+            for c in token.children:
+                if c:
+                    _walk(c, {})
+        else:
+            _walk(token, {})
+            
+        return runs
+
     @staticmethod
     def _list_mode(embed_node: EmbedTreeNode) -> str:
-        """Checks the underlying mistletoe token to decide BULLET vs ORDERED."""
-        token = embed_node.node
-        # mistletoe sets token.start on ordered lists (start=1)
-        if hasattr(token, 'start') and token.start is not None:
+        token = embed_node.node        # EmbedTreeNode
+        mistletoe_token = getattr(token, 'node', token)  # unwrap to mistletoe token
+        if hasattr(mistletoe_token, 'start') and mistletoe_token.start is not None:
             return "ORDERED"
         return "BULLET"
- 
+    
     def collect_all_requests(self, gdoc_root: GdocTreeNode) -> tuple[list[dict], list[dict]]:
-        """Returns (main_structural_requests, table_fill_requests)"""
         main_requests = []
         table_fills = []
     
@@ -347,10 +440,6 @@ class GdocTreeBuilder:
 # ---------------------------------------------------------------------------
  
 def _extract_text(token) -> str:
-    """
-    Recursively extracts plain text from any mistletoe token.
-    Works for Heading, Paragraph, ListItem, and inline spans.
-    """
     if isinstance(token, RawText):
         return token.content
     if hasattr(token, 'children') and token.children:
@@ -363,8 +452,6 @@ def _extract_table_data(token) -> list[list[str]]:
         return []
 
     rows = []
-
-    # mistletoe stores the header row separately on token.header
     header = getattr(token, 'header', None)
     if header and hasattr(header, 'children'):
         cells = []
@@ -375,7 +462,6 @@ def _extract_table_data(token) -> list[list[str]]:
         if cells:
             rows.append(cells)
 
-    # Body rows are in token.children
     for row_token in token.children:
         if not hasattr(row_token, 'children'):
             continue
@@ -389,4 +475,3 @@ def _extract_table_data(token) -> list[list[str]]:
             rows.append(cells)
 
     return rows
- 

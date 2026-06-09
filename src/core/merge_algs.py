@@ -10,9 +10,9 @@ from mistletoe.span_token import SpanToken, RawText
 
 
 import numpy as np
+from markdown_it import MarkdownIt
 from typing import List, Generator, Optional, Dict, Tuple
 from pydantic import BaseModel
-
 MIN_BLOCK_LEN = 5
 SIMILARITY_THRESHOLD=0.97
 
@@ -82,6 +82,7 @@ class SemanticReconciler:
         self.llm = llm_service
         self.SIMILARITY_THRESHOLD = similarity_threshold
         self.MIN_BLOCK_LEN = min_block_len
+        self.mdit = MarkdownIt()
 
     # --- 1. Matching Logic ---
 
@@ -331,6 +332,40 @@ def find_closest_cosine_sim(query_vec,list_vecs)->tuple[int,float]:
     similarities = np.dot(list_norms,query_norm)
     closest_idx = np.argmax(similarities)
     return closest_idx,similarities[closest_idx]
+def get_sampled_text(batch: list, chunk_size: int = 30) -> str:
+    """
+    Assembles all text content from a batch of EmbedTreeNodes (and their
+    children recursively), then samples first/middle/last N characters.
+    """
+    def _collect_text(node) -> str:
+        parts = []
+        content = getattr(node, 'content', '') or ''
+        if content.strip():
+            parts.append(content.strip())
+        for child in getattr(node, 'children', []) or []:
+            parts.append(_collect_text(child))
+        return ' '.join(filter(None, parts))
 
+    # Assemble full text across all nodes in the batch
+    full_text = ' '.join(
+        _collect_text(node)
+        for node in batch
+        if node
+    ).strip()
+
+    if not full_text:
+        return ""
+
+    n = len(full_text)
+
+    # If short enough return whole thing
+    if n <= chunk_size * 3:
+        return full_text
+
+    start  = full_text[:chunk_size]
+    middle = full_text[n // 2 - chunk_size // 2 : n // 2 + chunk_size // 2]
+    end    = full_text[n - chunk_size:]
+
+    return f"{start} [...] {middle} [...] {end}"
 if __name__ == "__main__": 
     pass

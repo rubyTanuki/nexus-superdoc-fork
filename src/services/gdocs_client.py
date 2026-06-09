@@ -83,8 +83,65 @@ class GoogleDocsAPI:
         
         return (doc_service, drive_service)
         
-
+class GoogleDriveImageEditor(GoogleDocsAPI): 
+    def __init__(self):
+        super().__init__()
     
+    def upload_image_bytes(self, image_bytes, filename="equation.png", folder_id=None):
+        """
+        Uploads raw image bytes directly from memory to Google Drive.
+        """
+        file_metadata = {'name': filename}
+        
+        # If you want to nest it under a specific directory/folder
+        if folder_id:
+            file_metadata['parents'] = [folder_id]
+
+        # Wrap the raw bytes in an in-memory stream wrapper
+        media = MediaIoBaseUpload(
+            io.BytesIO(image_bytes), 
+            mimetype='image/png', 
+            resumable=True
+        )
+
+        # Execute the upload request
+        uploaded_file = self.drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webContentLink'
+        ).execute()
+
+        print(f"Successfully uploaded {filename} to Drive. ID: {uploaded_file.get('id')}")
+        return uploaded_file  # Returns a dict with 'id' and 'webContentLink'
+
+    def upload_local_file(self, filepath, filename=None, folder_id=None):
+        """
+        Alternative method if you are saving images locally first.
+        """
+        import os
+        if not filename:
+            filename = os.path.basename(filepath)
+
+        file_metadata = {'name': filename}
+        if folder_id:
+            file_metadata['parents'] = [folder_id]
+
+        media = MediaFileUpload(
+            filepath, 
+            mimetype='image/png', 
+            resumable=True
+        )
+
+        uploaded_file = self.drive_service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, webContentLink'
+        ).execute()
+
+        return uploaded_file
+
+
+        
 class GoogleDocsEditor(GoogleDocsAPI):
     """
     Extended class providing high-level editing capabilities.

@@ -20,17 +20,16 @@ class SemanticTreeBuilder(BaseRenderer):
         """Helper to wrap block tokens using the expected Init signature."""
         # Check if it has content/children before adding
         content = EmbedTreeNode(token).content
-        if not content and not hasattr(token, 'children'):
+        has_children = bool(getattr(token, 'children', None))
+        if not content and not has_children:
             return ""
 
-        # Use the standard Init: (token, level)
         new_node = EmbedTreeNode(token, level=self.stack[-1][0])
-        
         if type_override:
             new_node.type = type_override
-
         self.stack[-1][1].add_child(new_node)
         return ""
+
 
     def render_heading(self, token):
         # EmbedTreeNode extracts type from token.__class__.__name__ automatically
@@ -45,7 +44,28 @@ class SemanticTreeBuilder(BaseRenderer):
         return ""
 
     def render_list(self, token):
-        return self._handle_block(token, "LIST")
+        new_node = EmbedTreeNode(token, level=self.stack[-1][0])
+        new_node.type = "LIST"
+        # Carry the mistletoe start attribute through
+        new_node.node.start = token.start  
+        self.stack[-1][1].add_child(new_node)
+        
+        # Push list onto stack so list items attach under it
+        self.stack.append((self.stack[-1][0], new_node))
+        self.render_inner(token)
+        self.stack.pop()
+        return ""
+
+    def render_list_item(self, token):
+        new_node = EmbedTreeNode(token, level=self.stack[-1][0])
+        new_node.type = "LIST_ITEM"
+        self.stack[-1][1].add_child(new_node)
+        
+        # Push so nested paragraphs attach under this item
+        self.stack.append((self.stack[-1][0], new_node))
+        self.render_inner(token)
+        self.stack.pop()
+        return ""
 
     def render_table(self, token):
         return self._handle_block(token, "TABLE")
@@ -63,3 +83,7 @@ class SemanticTreeBuilder(BaseRenderer):
     def render_document(self, token):
         self.render_inner(token)
         return self.root
+
+    def render_inline_math(self,token): 
+        # Pass it through cleanly so it's preserved in the token children array
+        return ""
