@@ -730,223 +730,168 @@ class GoogleDocsEditor(GoogleDocsAPI):
         #named_ranges = document.get("namedRanges",{})
     
 
-
-    def render_trees(self, superdoc_id: str, all_render_nodes: list, node_heading_pairs: dict):
-        print(f"\n--- Rendering {len(all_render_nodes)} branch(es) to Google Doc ---")
-        
-        # 1. Refresh credentials safely
-        if hasattr(self, 'refresh_credentials_if_needed'):
-            self.refresh_credentials_if_needed()
-        elif hasattr(self, 'creds') and self.creds and getattr(self.creds, 'expired', False):
-            from google.auth.transport.requests import Request
-            self.creds.refresh(Request())
-            
-        # 2. Fetch fresh document layout to find named range boundaries
-        doc_info = self.doc_service.documents().get(documentId=superdoc_id).execute()
-        named_ranges = doc_info.get('namedRanges', {})
-        
-        named_range_map = {}
-        for nr_name, nr_obj in named_ranges.items():
-            specs = nr_obj.get('namedRanges', [])
-            if specs and specs[0].get('ranges'):
-                rng = specs[0]['ranges'][0]
-                named_range_map[nr_name] = (rng.get('startIndex'), rng.get('endIndex'))
-        
-        # 3. Align render nodes with named ranges and sort DESCENDING (bottom-to-top of document)
-        branches_to_process = []
-        for gdoc_node in all_render_nodes:
-            node_str = str(gdoc_node)
-            heading_text = getattr(gdoc_node, 'content', '') or ''
-            if not heading_text and ': ' in node_str:
-                heading_text = node_str.split(': ', 1)[1]
-            if not heading_text:
-                heading_text = node_str
-                
-            heading_text_clean = heading_text.strip().lower()
-            matched_name = None
-            for nr_name in named_range_map:
-                if nr_name.lower() in heading_text_clean or heading_text_clean in nr_name.lower():
-                    matched_name = nr_name
-                    break
-            
-            if not matched_name and heading_text in named_range_map:
-                matched_name = heading_text
-                
-            if matched_name:
-                start_idx, end_idx = named_range_map[matched_name]
-                branches_to_process.append({
-                    'node': gdoc_node,
-                    'heading_name': matched_name,
-                    'startIndex': start_idx,
-                    'endIndex': end_idx
-                })
+    def render_trees(self, superdoc_id: str, all_render_nodes: list[EmbedTreeNode], node_heading_pairs: dict):
+        """
+        Renders a list of EmbedTreeNode branches into a Google Doc using GdocTreeBuilder.
+        1. Ensures headings exist in the Doc.
+        2. Builds GdocTree for each branch using the new renderer.
+        3. Fires pre-table requests, then post-table requests with live index correction,
+           then table fill requests — three separate batchUpdates per table encountered.
+        """
+        print(f"Connecting to Google Doc: {superdoc_id}")
+        self.get_document_structure(document_id=superdoc_id)
+    
+        headings = [node.content for node in all_render_nodes]
+        print(f"Received headings: {headings}")
+        self.create_headings(list(reversed(headings)))
+        self.get_document_structure(document_id=superdoc_id)
+    
+        heading_ranges = {}
+        for heading in headings:
+            named_range = self.find_named_range(heading)
+            if named_range:
+                heading_ranges[heading] = {
+                    'startIndex': named_range['namedRanges'][0]['ranges'][0]['startIndex'],
+                    'endIndex':   named_range['namedRanges'][0]['ranges'][0]['endIndex']
+                }
             else:
-                body_content = doc_info.get('body', {}).get('content', [])
-                end_of_doc = body_content[-1].get('endIndex', 1) - 1 if body_content else 1
-                branches_to_process.append({
-                    'node': gdoc_node,
-                    'heading_name': heading_text[:30],
-                    'startIndex': end_of_doc,
-                    'endIndex': end_of_doc
-                })
-
-        # Sort branches bottom-to-top so modifications don't break higher anchor positions
-        branches_to_process.sort(key=lambda x: x['startIndex'], reverse=True)
-        
-        # 4. Process each branch in its own isolated batch update to protect layout tracking
-        for branch_idx, branch in enumerate(branches_to_process):
-            anchor_idx = branch['endIndex']
-            
-            # Linearize nodes for this branch in REVERSE order (bottom-to-top layout stack)
-            nodes_to_render = []
-            def linearize_reverse(node):
-                children = getattr(node, 'children', []) or []
-                for child in reversed(children):
-                    linearize_reverse(child)
-                nodes_to_render.append(node)
-                
-            linearize_reverse(branch['node'])
-            
-            branch_requests = []
-            for node in nodes_to_render:
-                node_str = str(node)
-                node_type_attr = getattr(node, 'type', '').upper() or getattr(node, 'role', '').upper()
-                
-                # Robust type identification targeting explicit attributes and string signatures
-                if 'HEADING' in node_type_attr or '[HEADING]' in node_str.upper() or 'HEADING' in node_str.upper():
-                    resolved_type = 'HEADING'
-                elif 'LIST' in node_type_attr or '[LIST]' in node_str.upper() or 'LIST' in node_str.upper():
-                    resolved_type = 'LIST'
-                elif 'TABLE' in node_type_attr or '[TABLE]' in node_str.upper() or 'TABLE' in node_str.upper():
-                    resolved_type = 'TABLE'
-                else:
-                    resolved_type = 'PARA'
-                    
-                content = getattr(node, 'content', '') or ''
-                if not content and ': ' in node_str:
-                    content = node_str.split(': ', 1)[1]
-                content = content.strip()
-                if not content:
-                    continue
-                    
-                if resolved_type == 'HEADING':
-                    # Extract heading level hierarchies natively
-                    level = 2
-                    if 'HEADING' in node_type_attr and hasattr(node, 'level'):
-                        level = min(max(int(node.level), 1), 6)
-                    elif '###' in content: level = 3
-                    elif '##' in content: level = 2
-                    elif '#' in content: level = 1
-                    
-                    clean_text = content.replace('#', '').strip()
-                    text_to_insert = f"\n{clean_text}\n"
-                    
-                    branch_requests.append({"insertText": {"location": {"index": anchor_idx}, "text": text_to_insert}})
-                    branch_requests.append({
-                        "updateParagraphStyle": {
-                            "range": {"startIndex": anchor_idx, "endIndex": anchor_idx + len(text_to_insert)},
-                            "paragraphStyle": {"namedStyleType": f"HEADING_{level}"},
-                            "fields": "namedStyleType"
+                doc_content = self.doc.get('body', {}).get('content', [])
+                end = doc_content[-1].get('endIndex', 1) - 1
+                heading_ranges[heading] = {'startIndex': end, 'endIndex': end}
+    
+        all_render_nodes_sorted = sorted(
+            all_render_nodes,
+            key=lambda n: heading_ranges[n.content]['startIndex'],
+            reverse=True
+        )
+    
+        for node in all_render_nodes_sorted:
+            heading = node.content
+            insert_at = heading_ranges[heading]['endIndex']
+            start_index = heading_ranges[heading]['startIndex']
+    
+            builder = GdocTreeBuilder(start_index=insert_at)
+            gdoc_root = builder.build(embed_root=node, matched_nodes=node_heading_pairs)
+            main_requests, _, table_nodes = builder.collect_all_requests(gdoc_root)
+            text_len = builder._cursor - insert_at
+    
+            table_req_idx = next(
+                (i for i, r in enumerate(main_requests) if 'insertTable' in r),
+                None
+            )
+    
+            if table_req_idx is None:
+                print(f"No table found, firing {len(main_requests)} requests.")
+                if main_requests:
+                    self.batch_update(main_requests)
+    
+            else:
+                pre_table  = main_requests[:table_req_idx + 1]
+                post_table = main_requests[table_req_idx + 1:]
+    
+                print(f"Pre-table: {len(pre_table)} requests, post-table: {len(post_table)} requests.")
+    
+                if pre_table:
+                    self.batch_update(pre_table)
+    
+                # Fetch live doc to get real table endIndex
+                live_doc  = self.doc_service.documents().get(documentId=superdoc_id).execute()
+                live_body = live_doc.get('body', {}).get('content', [])
+                table_elements = [el for el in live_body if 'table' in el]
+    
+                if table_elements and post_table:
+                    real_table_end = table_elements[-1].get('endIndex', 0)
+                    print(f"Real table endIndex: {real_table_end}")
+    
+                    first_post = post_table[0]
+                    wrong_start = (
+                        first_post.get('insertText',          {}).get('location', {}).get('index')
+                        or first_post.get('updateParagraphStyle', {}).get('range',    {}).get('startIndex')
+                        or first_post.get('updateTextStyle',      {}).get('range',    {}).get('startIndex')
+                    )
+                    correction = real_table_end - wrong_start
+                    print(f"Cursor correction delta: {correction}")
+    
+                    self.batch_update(_shift_requests(post_table, correction))
+    
+                elif post_table:
+                    self.batch_update(post_table)
+    
+                # Table cell fill — re-fetch after post-table writes settle
+                if table_nodes:
+                    live_doc2  = self.doc_service.documents().get(documentId=superdoc_id).execute()
+                    live_body2 = live_doc2.get('body', {}).get('content', [])
+                    live_tables = [el['table'] for el in live_body2 if 'table' in el]
+    
+                    real_fill_requests = []
+                    for t_node, live_table in zip(table_nodes, live_tables):
+                        table_data = getattr(t_node, '_table_data', [])
+                        rows = live_table.get('tableRows', [])
+    
+                        # Reverse iteration so insertions don't shift indices of unfilled cells
+                        for r_idx in range(len(rows) - 1, -1, -1):
+                            cells = rows[r_idx].get('tableCells', [])
+                            source_row = table_data[r_idx] if r_idx < len(table_data) else []
+    
+                            for c_idx in range(len(cells) - 1, -1, -1):
+                                cell_text = source_row[c_idx] if c_idx < len(source_row) else ""
+                                if not cell_text:
+                                    continue
+                                cell_content = cells[c_idx].get('content', [])
+                                if not cell_content:
+                                    continue
+                                cell_start = cell_content[0].get('startIndex')
+                                cell_len   = self.text_utf16_len(cell_text)
+    
+                                real_fill_requests.append({
+                                    "insertText": {
+                                        "location": {"index": cell_start},
+                                        "text": cell_text
+                                    }
+                                })
+                                if r_idx == 0:  # bold header row
+                                    real_fill_requests.append({
+                                        "updateTextStyle": {
+                                            "range": {
+                                                "startIndex": cell_start,
+                                                "endIndex":   cell_start + cell_len
+                                            },
+                                            "textStyle": {"bold": True},
+                                            "fields": "bold"
+                                        }
+                                    })
+    
+                    if real_fill_requests:
+                        self.batch_update(real_fill_requests)
+                        print("Table fill batchUpdate complete.")
+    
+            # Named range update always fires last, after all content is settled
+            self.batch_update([
+                {'deleteNamedRange': {'name': heading}},
+                {
+                    'createNamedRange': {
+                        'name': heading,
+                        'range': {
+                            'startIndex': start_index,
+                            'endIndex':   max(start_index + 1, insert_at + text_len - 1)
                         }
-                    })
-                elif resolved_type == 'TABLE':
-                    lines = [l.strip() for l in content.split('\n') if '|' in l]
-                    num_rows = len(lines) if lines else 2
-                    num_cols = max(len([c for c in r.split('|') if c.strip()]) for r in lines) if lines else 3
-                    
-                    branch_requests.append({"insertText": {"location": {"index": anchor_idx}, "text": "\n"}})
-                    branch_requests.append({
-                        "insertTable": {
-                            "rows": num_rows,
-                            "columns": num_cols,
-                            "location": {"index": anchor_idx}
-                        }
-                    })
-                    branch_requests.append({"insertText": {"location": {"index": anchor_idx}, "text": "\n"}})
-                elif resolved_type == 'LIST':
-                    text_to_insert = f"{content}\n"
-                    branch_requests.append({"insertText": {"location": {"index": anchor_idx}, "text": text_to_insert}})
-                    branch_requests.append({
-                        "updateParagraphStyle": {
-                            "range": {"startIndex": anchor_idx, "endIndex": anchor_idx + len(text_to_insert)},
-                            "paragraphStyle": {
-                                "indentFirstLine": {"magnitude": 18, "unit": "PT"}, 
-                                "indentStart": {"magnitude": 36, "unit": "PT"}
-                            },
-                            "fields": "indentFirstLine,indentStart"
-                        }
-                    })
-                else:
-                    text_to_insert = f"{content}\n\n"
-                    branch_requests.append({"insertText": {"location": {"index": anchor_idx}, "text": text_to_insert}})
-                    
-            if branch_requests:
-                self.doc_service.documents().batchUpdate(
-                    documentId=superdoc_id, body={'requests': branch_requests}
-                ).execute()
+                    }
+                }
+            ])
+    
+        print("render_trees() complete.")
 
-        # 5. Live Table Hydration
-        updated_doc = self.doc_service.documents().get(documentId=superdoc_id).execute()
-        body_elements = updated_doc.get('body', {}).get('content', [])
-        gdoc_tables = [el['table'] for el in body_elements if 'table' in el]
-        
-        tree_table_nodes = []
-        def collect_table_nodes(node):
-            node_str = str(node)
-            node_type_attr = getattr(node, 'type', '').upper() or getattr(node, 'role', '').upper()
-            if 'TABLE' in node_type_attr or '[TABLE]' in node_str.upper() or 'TABLE' in node_str.upper():
-                tree_table_nodes.append(node)
-            for child in (getattr(node, 'children', []) or []):
-                collect_table_nodes(child)
-                
-        for branch in reversed(branches_to_process):
-            collect_table_nodes(branch['node'])
-            
-        if gdoc_tables and tree_table_nodes:
-            hydration_requests = []
-            for idx, tree_node in enumerate(tree_table_nodes):
-                if idx >= len(gdoc_tables): break
-                gdoc_table = gdoc_tables[idx]
-                
-                content = getattr(tree_node, 'content', '') or str(tree_node)
-                lines = [l.strip() for l in content.split('\n') if '|' in l]
-                
-                table_matrix = []
-                for r in lines:
-                    if not all(c in '| -:' for c in r):
-                        cells = [c.strip() for c in r.split('|')[1:-1] if c.strip()]
-                        if cells: table_matrix.append(cells)
-                
-                # Fallback parser if your pipeline stripped row markdown characters completely
-                if not table_matrix:
-                    raw_cells = [c.strip() for c in content.replace('|', ' ').split('  ') if c.strip()]
-                    if "Row 1" in content:
-                        # Reconstruct a basic 2x3 fallback matrix if text was flattened
-                        table_matrix = [["Row 1, Col 1", "Row 1, Col 2", "Row 1, Col 3"], 
-                                        ["Row 2, Col 1", "Row 2, Col 2", "Row 2, Col 3"]]
-                
-                table_rows = gdoc_table.get('tableRows', [])
-                for r_idx in reversed(range(len(table_rows))):
-                    row = table_rows[r_idx]
-                    cells = row.get('tableCells', [])
-                    source_row = table_matrix[r_idx] if r_idx < len(table_matrix) else []
-                    
-                    for c_idx in reversed(range(len(cells))):
-                        cell = cells[c_idx]
-                        cell_text = source_row[c_idx] if c_idx < len(source_row) else ""
-                        if cell_text and cell.get('content'):
-                            cell_start = cell['content'][0].get('startIndex')
-                            hydration_requests.append({
-                                "insertText": {"location": {"index": cell_start}, "text": cell_text}
-                            })
-                            
-            if hydration_requests:
-                self.doc_service.documents().batchUpdate(
-                    documentId=superdoc_id, body={'requests': hydration_requests}
-                ).execute()
-        print("Rendering pipeline completed successfully!")
-
-
+    def _collect_table_nodes(self, embed_nodes: list) -> list:
+        """DFS collect all TABLE EmbedTreeNodes across a list of root nodes."""
+        results = []
+        def _dfs(node):
+            if node.type == "TABLE":
+                results.append(node)
+            for child in node.children:
+                _dfs(child)
+        for root in embed_nodes:
+            _dfs(root)
+        return results
 
 
     def render_etree_custom_nodes(self,superdoc_id:str,all_cust_nodes:list[EmbedTreeNode]): 
@@ -1057,11 +1002,59 @@ class GoogleDocsEditor(GoogleDocsAPI):
         self.batch_update(batch_all_requests)
         print(f"FINISHED BATCH UPDATE")
 
-    
+    def append_italic_text(self, text: str):
+        """
+        Appends italicized text to the end of the document.
+        """
+        doc = self.doc_service.documents().get(documentId=self.document_id).execute()
+        body_content = doc.get('body', {}).get('content', [])
+        insert_index = body_content[-1].get('endIndex', 1) - 1
 
+        text_to_insert = text + "\n"
+        text_len = self.text_utf16_len(text_to_insert)
+
+        requests = [
+            {
+                'insertText': {
+                    'location': {'index': insert_index},
+                    'text': text_to_insert
+                }
+            },
+            {
+                'updateTextStyle': {
+                    'range': {
+                        'startIndex': insert_index,
+                        'endIndex': insert_index + text_len
+                    },
+                    'textStyle': {'italic': True},
+                    'fields': 'italic'
+                }
+            }
+        ]
+
+        self.batch_update(requests=requests)
+
+def _shift_requests(requests: list[dict], delta: int) -> list[dict]:
+    """Shifts all index values in a list of Docs API requests by delta."""
+    import copy
+
+    def _shift_dict(d: dict):
+        for k, v in d.items():
+            if k in ('index', 'startIndex', 'endIndex') and isinstance(v, int):
+                d[k] += delta
+            elif isinstance(v, dict):
+                _shift_dict(v)
+
+    shifted = copy.deepcopy(requests)
+    for r in shifted:
+        _shift_dict(r)
+    return shifted
 
 def main():
     """Main entry point for local debugging."""
+    gde = GoogleDocsEditor()
+    gde.get_document_structure(document_id="1Q1whz1kFN9wj1_mamWgaDbKh7przNmc5owdOSNovC04")
+    gde.append_italic_text("This is a test of the italic text insertion function.")
     pass
 if __name__ == "__main__":
     main()

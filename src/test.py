@@ -699,3 +699,4 @@ def _print_request(req_type: str, details: dict, prefix: str) -> None:
 if __name__ == "__main__":
     # Change this to your actual file path
     test_render_to_gdocs2("files/basic-text.pdf")
+    #test_show_structure("files/basic-text.pdf")

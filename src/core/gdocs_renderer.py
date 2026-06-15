@@ -75,41 +75,44 @@ class GdocTreeBuilder:
         gdoc_parent: GdocTreeNode,
         matched_nodes: dict,
         depth: int,
-        list_mode: str | None = None,   # "BULLET" | "ORDERED" | None
+        list_mode: str | None = None,
     ) -> None:
         gdoc_node = GdocTreeNode(embed_node)
         gdoc_node.matched_heading = matched_nodes.get(embed_node)
         gdoc_parent.add_child(gdoc_node)
- 
-        node_type = embed_node.type  # e.g. "Heading", "PARA", "LIST", "TABLE", "QUOTE"
- 
+
+        node_type = embed_node.type
+
         if node_type == "Heading":
             self._gen_heading(gdoc_node, depth)
             for child in embed_node.children:
-                self._visit(child, gdoc_node, matched_nodes, depth + 1, list_mode)
- 
-        elif node_type == "PARA":
-            self._gen_paragraph(gdoc_node, depth, list_mode)
- 
+                self._visit(child, gdoc_node, matched_nodes, depth + 1, list_mode=None)
+
         elif node_type == "LIST":
+            # Determine bullet vs ordered, pass mode down — do NOT render LIST itself
             mode = self._list_mode(embed_node)
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, mode)
 
-        elif node_type == "LIST_ITEM":  # add this branch
-            for child in embed_node.children:
-                self._visit(child, gdoc_node, matched_nodes, depth, list_mode)  # pass through
-        
-        elif node_type == "TABLE":
-            self._gen_table(gdoc_node, depth)
- 
-        elif node_type == "QUOTE":
-            self._gen_quote(gdoc_node, depth)
- 
-        else:
+        elif node_type == "LIST_ITEM":
+            # LIST_ITEM is a structural wrapper — only its PARA children render
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, list_mode)
- 
+
+        elif node_type == "PARA":
+            self._gen_paragraph(gdoc_node, depth, list_mode)
+            # PARA is a leaf renderer — never recurse into children
+
+        elif node_type == "TABLE":
+            self._gen_table(gdoc_node, depth)
+
+        elif node_type == "QUOTE":
+            self._gen_quote(gdoc_node, depth)
+
+        else:
+            # Unknown structural node — recurse without rendering
+            for child in embed_node.children:
+                self._visit(child, gdoc_node, matched_nodes, depth, list_mode)
     # ------------------------------------------------------------------
     # Request generators (each mutates self._cursor)
     # ------------------------------------------------------------------
@@ -150,6 +153,8 @@ class GdocTreeBuilder:
         paragraph metrics without breaking the character flow layout.
         """
         token_source = gdoc_node.node.node
+        if token_source.__class__.__name__ not in ("Paragraph", "RawText"):
+            return
         runs = self._extract_styled_runs(token_source)
         if not runs:
             return
@@ -245,7 +250,7 @@ class GdocTreeBuilder:
         num_cols = max(len(row) for row in table_data)
         start = self._cursor
 
-        create_request = [
+        gdoc_node.requests = [
             {
                 "insertTable": {
                     "rows": num_rows,
@@ -255,39 +260,18 @@ class GdocTreeBuilder:
             }
         ]
 
-        fill_requests = []
-        cell_cursor = start + 2
+        gdoc_node._table_data = table_data
+        gdoc_node._table_fill = []
 
-        for r_idx, row in enumerate(table_data):
-            padded_row = row + [""] * (num_cols - len(row))
-            for cell_text in padded_row:
-                if cell_text:
-                    cell_len = _utf16_len(cell_text)
-                    fill_requests.append({
-                        "insertText": {
-                            "location": {"index": cell_cursor},
-                            "text": cell_text,
-                        }
-                    })
-                    if r_idx == 0:
-                        fill_requests.append({
-                            "updateTextStyle": {
-                                "range": {
-                                    "startIndex": cell_cursor,
-                                    "endIndex": cell_cursor + cell_len,
-                                },
-                                "textStyle": {"bold": True},
-                                "fields": "bold",
-                            }
-                        })
-                cell_cursor += 1  
-            cell_cursor += 1  
+        # Flag that everything after this node needs cursor recalculation
+        gdoc_node._is_table = True
+        gdoc_node._table_start = start
+        gdoc_node._num_rows = num_rows
+        gdoc_node._num_cols = num_cols
 
-        empty_table_offset = 1 + (num_rows * num_cols) + num_rows + 1
-        gdoc_node.requests = create_request
-        gdoc_node._table_fill = fill_requests
-        self._cursor += empty_table_offset
- 
+        # Temporarily advance cursor by a placeholder — will be corrected in render_trees
+        # after a live doc fetch post insertTable
+        self._cursor += 1  # placeholder, real offset set externally
     def _gen_quote(self, gdoc_node: GdocTreeNode, depth: int) -> None:
         raw = gdoc_node.content.strip()
         if not raw:
@@ -319,55 +303,6 @@ class GdocTreeBuilder:
         ]
  
         self._cursor += text_len
- 
-    # ------------------------------------------------------------------
-    # Math Rendering Engine Additions
-    # ------------------------------------------------------------------
- 
-    def _render_latex_to_bytes(self, formula: str) -> bytes:
-        """Compiles standard LaTeX syntax fields to high-fidelity transparent images."""
-        fig = plt.figure(figsize=(0.1, 0.1), dpi=300)
-        fig.text(0, 0, f"${formula}$", fontsize=11, usetex=False)
-        
-        buf = io.BytesIO()
-        fig.savefig(buf, format="png", bbox_inches="tight", pad_inches=0.02, transparent=True)
-        plt.close(fig)
-        return buf.getvalue()
-
-    def _insert_inline_math_image(self, formula_text: str, index: int) -> dict:
-        """Side-loads image data blocks directly into the execution drive path."""
-        if not self.api:
-            raise RuntimeError("GoogleDocsAPI instance missing. Use builder.set_google_api(api) before execution.")
-            
-        img_bytes = self._render_latex_to_bytes(formula_text)
-        uploaded_file = self.api.upload_image_bytes(img_bytes, filename=f"latex_{index}.png")
-        
-        image_url = uploaded_file.get("webContentLink")
-        file_id = uploaded_file.get("id")
-        self._temp_drive_files.append(file_id)
-
-        return {
-            "insertInlineImage": {
-                "uri": image_url,
-                "location": {"index": index},
-                "objectSize": {
-                    "height": {"magnitude": 13, "unit": "PT"}
-                }
-            }
-        }
-
-    def commit_and_cleanup_math(self, doc_id: str):
-        """Executes the batch request, then purges the temporary LaTeX files from Drive."""
-        if not self._temp_drive_files:
-            return
-            
-        print(f"Purging {len(self._temp_drive_files)} temporary equation assets from Drive...")
-        for file_id in self._temp_drive_files:
-            try:
-                self.api.drive_service.files().delete(fileId=file_id).execute()
-            except Exception as e:
-                print(f"Could not purge file {file_id}: {e}")
-        self._temp_drive_files.clear()
 
     # ------------------------------------------------------------------
     # Inline Runs & Token Traversal Engine
@@ -389,21 +324,19 @@ class GdocTreeBuilder:
                 case "Strong":        new_style["bold"] = True
                 case "Emphasis":      new_style["italic"] = True
                 case "Strikethrough": new_style["strikethrough"] = True
-                case "InlineMath":    new_style["is_math"] = True
 
-            if node_class == "RawText" or node_class == "InlineMath":
-                # Leaf fragments emit actual rendering strings
+            if node_class in ("RawText"):
                 content = getattr(node, "content", "")
                 if content:
                     runs.append((content, new_style))
-            elif hasattr(node, "children") and node.children:
+                return  # explicit return — never recurse into leaves
+
+            # Recurse into everything else
+            if hasattr(node, "children") and node.children:
                 for child in node.children:
                     if child:
                         _walk(child, new_style)
-            else:
-                content = getattr(node, "content", "")
-                if content:
-                    runs.append((content, new_style))
+
 
         if hasattr(token, "children") and token.children:
             for c in token.children:
@@ -422,17 +355,20 @@ class GdocTreeBuilder:
             return "ORDERED"
         return "BULLET"
     
-    def collect_all_requests(self, gdoc_root: GdocTreeNode) -> tuple[list[dict], list[dict]]:
+    def collect_all_requests(self, gdoc_root: GdocTreeNode) -> tuple[list[dict], list[dict], list[GdocTreeNode]]:
         main_requests = []
         table_fills = []
+        table_nodes = []
     
         for node in gdoc_root.apply(lambda n: n):
             if hasattr(node, 'requests') and node.requests:
                 main_requests.extend(node.requests)
             if hasattr(node, '_table_fill') and node._table_fill:
                 table_fills.extend(node._table_fill)
+            if hasattr(node, '_table_data') and node._table_data:
+                table_nodes.append(node)
     
-        return main_requests, table_fills
+        return main_requests, table_fills, table_nodes
  
  
 # ---------------------------------------------------------------------------

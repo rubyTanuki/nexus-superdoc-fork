@@ -104,7 +104,7 @@ def _utf16_len(text: str) -> int:
  
  
 class GdocTreeNode:
-    __slots__ = ['node', 'type', 'level', 'parent', 'children', 'content', 'matched_heading', 'requests','_table_create','_table_fill']
+    __slots__ = ['node', 'type', 'level', 'parent', 'children', 'content', 'matched_heading', 'requests','_table_create','_table_fill', '_table_data','_is_table','_table_start','_num_rows','_num_cols']
  
     def __init__(self, embed_node: EmbedTreeNode):
         self.node = embed_node
