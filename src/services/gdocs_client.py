@@ -273,26 +273,37 @@ class GoogleDocsEditor(GoogleDocsAPI):
         
     
             
-    def batch_update(self,requests):
+    def batch_update(self, requests):
         """
         Executes a list of formatting or structural requests in a single API call.
-        This is the primary way to modify the document efficiently.
         """
-        if not requests or len(requests) == 0: 
+        if not requests or len(requests) == 0:
             return
-        try: 
-            # Execute the batch update
+
+        try:
             result = self.doc_service.documents().batchUpdate(
-                #replace with actual document_id 
                 documentId=self.document_id,
                 body={'requests': requests}
             ).execute()
-            
-            #print(f"Successfully inserted text at index {insertion_index}")
             return True
-            
+
         except Exception as e:
-            print(f"Error inserting text: {e}")
+            print(f"Error in batchUpdate: {e}")
+            # Binary search to find the exact failing request
+            if len(requests) == 1:
+                print(f"Failing request: {requests[0]}")
+                return False
+
+            mid = len(requests) // 2
+            print(f"Bisecting {len(requests)} requests — trying first half ({mid} requests)...")
+            first_ok = self.batch_update(requests[:mid])
+            if first_ok:
+                print(f"First half succeeded — problem is in second half:")
+                self.batch_update(requests[mid:])
+            else:
+                print(f"Problem is in first half:")
+                self.batch_update(requests[:mid])
+
             return False
     
     
@@ -735,17 +746,19 @@ class GoogleDocsEditor(GoogleDocsAPI):
         Renders a list of EmbedTreeNode branches into a Google Doc using GdocTreeBuilder.
         1. Ensures headings exist in the Doc.
         2. Builds GdocTree for each branch using the new renderer.
-        3. Fires pre-table requests, then post-table requests with live index correction,
-           then table fill requests — three separate batchUpdates per table encountered.
+        3. Fires main requests, then table fill requests in two separate batchUpdates.
         """
         print(f"Connecting to Google Doc: {superdoc_id}")
         self.get_document_structure(document_id=superdoc_id)
-    
+
+        # Create headings in reverse so doc indices stay stable during insertion
         headings = [node.content for node in all_render_nodes]
+        headings_reversed = list(reversed(headings))
         print(f"Received headings: {headings}")
-        self.create_headings(list(reversed(headings)))
+        self.create_headings(headings_reversed)
         self.get_document_structure(document_id=superdoc_id)
-    
+
+        # Collect named range end indices for each heading (insertion points)
         heading_ranges = {}
         for heading in headings:
             named_range = self.find_named_range(heading)
@@ -755,130 +768,61 @@ class GoogleDocsEditor(GoogleDocsAPI):
                     'endIndex':   named_range['namedRanges'][0]['ranges'][0]['endIndex']
                 }
             else:
-                doc_content = self.doc.get('body', {}).get('content', [])
-                end = doc_content[-1].get('endIndex', 1) - 1
-                heading_ranges[heading] = {'startIndex': end, 'endIndex': end}
-    
+                raise ValueError(f"Heading '{heading}' not found after creation. This should never happen.")
+                # Fallback to end of doc if named range missing
+                #doc_content = self.doc.get('body', {}).get('content', [])
+                #end = doc_content[-1].get('endIndex', 1) - 1
+                #heading_ranges[heading] = {'startIndex': end, 'endIndex': end}
+
+        # Sort branches bottom-to-top so insertions don't corrupt higher indices
         all_render_nodes_sorted = sorted(
             all_render_nodes,
             key=lambda n: heading_ranges[n.content]['startIndex'],
             reverse=True
         )
-    
+
+        all_main_requests = []
+        #all_table_fills = []
+
         for node in all_render_nodes_sorted:
             heading = node.content
             insert_at = heading_ranges[heading]['endIndex']
             start_index = heading_ranges[heading]['startIndex']
-    
+
             builder = GdocTreeBuilder(start_index=insert_at)
             gdoc_root = builder.build(embed_root=node, matched_nodes=node_heading_pairs)
-            main_requests, _, table_nodes = builder.collect_all_requests(gdoc_root)
+            main_requests, table_fills, _ = builder.collect_all_requests(gdoc_root)
+
             text_len = builder._cursor - insert_at
-    
-            table_req_idx = next(
-                (i for i, r in enumerate(main_requests) if 'insertTable' in r),
-                None
-            )
-    
-            if table_req_idx is None:
-                print(f"No table found, firing {len(main_requests)} requests.")
-                if main_requests:
-                    self.batch_update(main_requests)
-    
-            else:
-                pre_table  = main_requests[:table_req_idx + 1]
-                post_table = main_requests[table_req_idx + 1:]
-    
-                print(f"Pre-table: {len(pre_table)} requests, post-table: {len(post_table)} requests.")
-    
-                if pre_table:
-                    self.batch_update(pre_table)
-    
-                # Fetch live doc to get real table endIndex
-                live_doc  = self.doc_service.documents().get(documentId=superdoc_id).execute()
-                live_body = live_doc.get('body', {}).get('content', [])
-                table_elements = [el for el in live_body if 'table' in el]
-    
-                if table_elements and post_table:
-                    real_table_end = table_elements[-1].get('endIndex', 0)
-                    print(f"Real table endIndex: {real_table_end}")
-    
-                    first_post = post_table[0]
-                    wrong_start = (
-                        first_post.get('insertText',          {}).get('location', {}).get('index')
-                        or first_post.get('updateParagraphStyle', {}).get('range',    {}).get('startIndex')
-                        or first_post.get('updateTextStyle',      {}).get('range',    {}).get('startIndex')
-                    )
-                    correction = real_table_end - wrong_start
-                    print(f"Cursor correction delta: {correction}")
-    
-                    self.batch_update(_shift_requests(post_table, correction))
-    
-                elif post_table:
-                    self.batch_update(post_table)
-    
-                # Table cell fill — re-fetch after post-table writes settle
-                if table_nodes:
-                    live_doc2  = self.doc_service.documents().get(documentId=superdoc_id).execute()
-                    live_body2 = live_doc2.get('body', {}).get('content', [])
-                    live_tables = [el['table'] for el in live_body2 if 'table' in el]
-    
-                    real_fill_requests = []
-                    for t_node, live_table in zip(table_nodes, live_tables):
-                        table_data = getattr(t_node, '_table_data', [])
-                        rows = live_table.get('tableRows', [])
-    
-                        # Reverse iteration so insertions don't shift indices of unfilled cells
-                        for r_idx in range(len(rows) - 1, -1, -1):
-                            cells = rows[r_idx].get('tableCells', [])
-                            source_row = table_data[r_idx] if r_idx < len(table_data) else []
-    
-                            for c_idx in range(len(cells) - 1, -1, -1):
-                                cell_text = source_row[c_idx] if c_idx < len(source_row) else ""
-                                if not cell_text:
-                                    continue
-                                cell_content = cells[c_idx].get('content', [])
-                                if not cell_content:
-                                    continue
-                                cell_start = cell_content[0].get('startIndex')
-                                cell_len   = self.text_utf16_len(cell_text)
-    
-                                real_fill_requests.append({
-                                    "insertText": {
-                                        "location": {"index": cell_start},
-                                        "text": cell_text
-                                    }
-                                })
-                                if r_idx == 0:  # bold header row
-                                    real_fill_requests.append({
-                                        "updateTextStyle": {
-                                            "range": {
-                                                "startIndex": cell_start,
-                                                "endIndex":   cell_start + cell_len
-                                            },
-                                            "textStyle": {"bold": True},
-                                            "fields": "bold"
-                                        }
-                                    })
-    
-                    if real_fill_requests:
-                        self.batch_update(real_fill_requests)
-                        print("Table fill batchUpdate complete.")
-    
-            # Named range update always fires last, after all content is settled
-            self.batch_update([
+
+            all_main_requests.extend(main_requests)
+            #all_table_fills.extend(table_fills)
+
+            # Update named range to cover newly inserted content
+            all_main_requests.extend([
                 {'deleteNamedRange': {'name': heading}},
                 {
                     'createNamedRange': {
                         'name': heading,
                         'range': {
                             'startIndex': start_index,
-                            'endIndex':   max(start_index + 1, insert_at + text_len - 1)
+                            'endIndex': max(start_index + 1, insert_at + text_len - 1)
                         }
                     }
                 }
             ])
-    
+
+        print(f"Total main requests: {len(all_main_requests)}")
+        #print(f"Total table fill requests: {len(all_table_fills)}")
+
+        if all_main_requests:
+            self.batch_update(all_main_requests)
+            print("Main batchUpdate complete.")
+
+        #if all_table_fills:
+            #self.batch_update(all_table_fills)
+            #print("Table fill batchUpdate complete.")
+
         print("render_trees() complete.")
 
     def _collect_table_nodes(self, embed_nodes: list) -> list:
@@ -893,6 +837,17 @@ class GoogleDocsEditor(GoogleDocsAPI):
             _dfs(root)
         return results
 
+    def clear_document(self, superdoc_id: str):
+        doc = self.doc_service.documents().get(documentId=superdoc_id).execute()
+        body = doc.get('body', {}).get('content', [])
+        end_index = body[-1].get('endIndex', 1)
+        if end_index > 2:
+            self.document_id = superdoc_id
+            self.batch_update([{
+                'deleteContentRange': {
+                    'range': {'startIndex': 1, 'endIndex': end_index - 1}
+                }
+            }])
 
     def render_etree_custom_nodes(self,superdoc_id:str,all_cust_nodes:list[EmbedTreeNode]): 
         """

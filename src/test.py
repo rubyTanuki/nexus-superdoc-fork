@@ -323,6 +323,7 @@ def test_render_to_gdocs2(file_path):
     # --- Render all branches to Google Docs ---
     print(f"\n--- Rendering {len(all_render_nodes)} branch(es) to Google Doc ---")
     gdoc_editor = GoogleDocsEditor()
+    #gdoc_editor.clear_document(superdoc_id=DOCUMENT_ID)
     gdoc_editor.render_trees(
         superdoc_id=DOCUMENT_ID,
         all_render_nodes=all_render_nodes,
@@ -581,7 +582,7 @@ def test_show_structure(file_path):
     # 2. Build the Initial Mistletoe AST and Semantic Tree
     # Ensure mistletoe.Document.insert_plugin(InlineMath) happened somewhere globally
     mistletoe_doc = mistletoe.Document(md_text)
-    
+    print_detailed_tree(mistletoe_doc)  # This will show the full nested structure of the Mistletoe parse tree
     print("\n[Step 2] Building Semantic Stack Tree...")
     with SemanticTreeBuilder() as builder:
         nested_tree = builder.render(mistletoe_doc)

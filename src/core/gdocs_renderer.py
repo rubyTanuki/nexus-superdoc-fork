@@ -104,7 +104,8 @@ class GdocTreeBuilder:
             # PARA is a leaf renderer — never recurse into children
 
         elif node_type == "TABLE":
-            self._gen_table(gdoc_node, depth)
+            #self._gen_table(gdoc_node, depth)
+            pass
 
         elif node_type == "QUOTE":
             self._gen_quote(gdoc_node, depth)
@@ -156,6 +157,7 @@ class GdocTreeBuilder:
         if token_source.__class__.__name__ not in ("Paragraph", "RawText"):
             return
         runs = self._extract_styled_runs(token_source)
+        print(f"Runs: {runs}")
         if not runs:
             return
  
@@ -164,6 +166,29 @@ class GdocTreeBuilder:
         requests = []
  
         # Loop over every style span run inside the paragraph
+        # Collect text style requests separately
+        text_style_requests = []
+        for text_segment, style in runs:
+            if not text_segment:
+                continue
+            seg_len = _utf16_len(text_segment)
+            requests.append({"insertText": {"location": {"index": self._cursor}, "text": text_segment}})
+            if style:
+                text_styles = {k: v for k, v in style.items() if k != "is_math"}
+                if text_styles:
+                    text_style_requests.append({
+                        "updateTextStyle": {
+                            "textStyle": text_styles,
+                            "fields": ",".join(text_styles.keys()),
+                            "range": {
+                                "startIndex": self._cursor,
+                                "endIndex": self._cursor + seg_len
+                            }
+                        }
+                    })
+            self._cursor += seg_len
+
+        '''
         for text_segment, style in runs:
             if not text_segment:
                 continue
@@ -185,6 +210,8 @@ class GdocTreeBuilder:
                 # Separate out text styling parameters from custom engine tracking flags
                 text_styles = {k: v for k, v in style.items() if k != "is_math"}
                 if text_styles:
+                    print(f"Style request: {text_styles} over [{self._cursor}, {self._cursor + seg_len}]")
+                if text_styles:
                     requests.append({
                         "updateTextStyle": {
                             "textStyle": text_styles,
@@ -196,7 +223,7 @@ class GdocTreeBuilder:
                         }
                     })
                 self._cursor += seg_len
- 
+        '''
         # Insert structural spacing suffix
         suffix_len = _utf16_len(suffix)
         requests.append({
@@ -239,6 +266,7 @@ class GdocTreeBuilder:
             }
         })
  
+        requests.append(text_style_requests)
         gdoc_node.requests = requests
  
     def _gen_table(self, gdoc_node: GdocTreeNode, depth: int) -> None:
