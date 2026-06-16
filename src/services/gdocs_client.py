@@ -357,16 +357,16 @@ class GoogleDocsEditor(GoogleDocsAPI):
                 'name': new_heading,
                 'range': {
                     'startIndex': startIndex,
-                    'endIndex': endIndex_for_range
+                    'endIndex': endIndex_for_formatting
                 }
             }
         },
         {
             'updateParagraphStyle': {
-                'paragraphStyle': {'namedStyleType': 'HEADING_2'},
+                'paragraphStyle': {'namedStyleType': 'HEADING_1'},
                 'range': {
                     'startIndex': startIndex,
-                    'endIndex': endIndex_for_range
+                    'endIndex': endIndex_for_formatting
                 },
                 'fields': 'namedStyleType'
             }
@@ -615,79 +615,104 @@ class GoogleDocsEditor(GoogleDocsAPI):
         return (content[-1].get('endIndex'),content[-1].get('endIndex') - 1,-1)
 
 
-    def catch_skips(self):
+    def catch_skips(self) -> list[dict]:
         """
-        Scans all named ranges and catches gaps between them if there's extra content between ranges.
+        Scans all named ranges (anchors) and reads the in-memory text inside the 
+        gaps between them to identify unmanaged text or new heading markers.
         """
-        #self.get_document_structure(document_id=document_id)
         document = self.doc
         named_ranges = document.get("namedRanges", {})
         
-        # Guard clause in case there are no named ranges at all
         if not named_ranges:
             print("No named ranges found in document.")
             return []
 
+        # Sort named ranges purely by where they appear in the document
         sorted_items = sorted(
             named_ranges.items(),
             key=lambda item: item[1].get("namedRanges", [{}])[0]
                                    .get("ranges", [{}])[0]
-                                   .get("endIndex", 0)
+                                   .get("startIndex", 0)
         ) 
         
-        skips = []
+        gaps = []
         
-        # Catch gaps between existing named ranges
+        # 1. Catch gaps between consecutive named ranges
         for i in range(1, len(sorted_items)):
-            prev_ranges = sorted_items[i-1][1]\
-                        .get("namedRanges", [{}])[0]\
-                        .get("ranges", [{}])[0]
-            curr_ranges = sorted_items[i][1]\
-                        .get("namedRanges", [{}])[0]\
-                        .get("ranges", [{}])[0]
+            prev_ranges = sorted_items[i-1][1].get("namedRanges", [{}])[0].get("ranges", [{}])[0]
+            curr_ranges = sorted_items[i][1].get("namedRanges", [{}])[0].get("ranges", [{}])[0]
             
-            prevEndIdx = prev_ranges.get("endIndex", 0)
-            currStartIdx = curr_ranges.get("startIndex", 0)
+            prev_end_idx = prev_ranges.get("endIndex", 0)
+            curr_start_idx = curr_ranges.get("startIndex", 0)
             
-            diff = currStartIdx - prevEndIdx
-            print(f"Gap between ranges: {diff}")
+            diff = curr_start_idx - prev_end_idx
             
-            if diff > self.text_utf16_len('\n') and diff > MIN_BLOCK_LEN: 
-                print("hit")
-                skips.append({
-                    'startIndex': prevEndIdx + 1,
-                    'endIndex': currStartIdx - 1
+            if diff > MIN_BLOCK_LEN: 
+                # Slicing from in-memory self.doc is practically zero overhead
+                gap_text = self.get_text_in_indices_from_doc_obj(prev_end_idx, curr_start_idx)
+                gaps.append({
+                    'startIndex': prev_end_idx,
+                    'endIndex': curr_start_idx,
+                    'text': gap_text,
+                    'preceded_by_heading': sorted_items[i-1][0] # Name of the section owning this text
                 })
 
-        # Grab the last named-range and check for trailing content
+        # 2. Check the trailing gap after the absolute last named range
         if sorted_items: 
-            last_range = sorted_items[-1][1]\
-                            .get("namedRanges", [{}])[0]\
-                            .get("ranges", [{}])[0]
-
-            print(f"Last Range: {last_range}")
+            last_range = sorted_items[-1][1].get("namedRanges", [{}])[0].get("ranges", [{}])[0]
             last_range_end = last_range.get("endIndex", 0)
 
-            # Find total length of doc-body 
             doc_body = document.get("body", {})
             doc_content = doc_body.get("content", [])
 
             if doc_content: 
                 doc_end_index = doc_content[-1].get("endIndex", 0)
-
                 usable_doc_end = doc_end_index - 1
                 final_diff = usable_doc_end - last_range_end
-                print(f"Trailing Indices: {usable_doc_end}, {last_range_end}")
-                print(f"Trailing gap at end: {final_diff}")
                 
-                if final_diff > self.text_utf16_len('\n') and final_diff > MIN_BLOCK_LEN: 
-                    print("Trailing content gap detected!")
-                    skips.append({
-                        'startIndex': last_range_end + 1, 
-                        'endIndex': usable_doc_end
+                if final_diff > MIN_BLOCK_LEN: 
+                    gap_text = self.get_text_in_indices_from_doc_obj(last_range_end, usable_doc_end)
+                    gaps.append({
+                        'startIndex': last_range_end, 
+                        'endIndex': usable_doc_end,
+                        'text': gap_text,
+                        'preceded_by_heading': sorted_items[-1][0]
                     })
                     
-        return skips
+        return gaps
+
+    def find_new_headings_in_gaps(self, gaps: list[dict]) -> list[dict]:
+        """
+        Scans extracted gap text for a heading pattern (e.g., lines ending with ':') 
+        and calculates their true global document index.
+        """
+        import re
+        new_headings = []
+        
+        # Matches lines that end with a colon (ignoring trailing spaces)
+        # e.g., "Neural Networks:" or "<Heading>:"
+        pattern = re.compile(r'^(.+?):\s*$', re.MULTILINE)
+        
+        for gap in gaps:
+            for match in pattern.finditer(gap['text']):
+                heading_text = match.group(1).strip()
+                
+                # Crucial step: Find match start character index relative to the gap string
+                char_offset = match.start()
+                
+                # Convert character offset to a true global document UTF-16 index
+                # We extract text up to the match location to accurately count UTF-16 spacing
+                text_before_match = gap['text'][:char_offset]
+                utf16_offset = self.text_utf16_len(text_before_match)
+                
+                global_start_index = gap['startIndex'] + utf16_offset
+                
+                new_headings.append({
+                    'heading': heading_text,
+                    'startIndex': global_start_index
+                })
+                
+        return new_headings
 
     def mutate_named_ranges(self,document_id:str):
         """
@@ -793,12 +818,12 @@ class GoogleDocsEditor(GoogleDocsAPI):
             gdoc_root = builder.build(embed_root=node, matched_nodes=node_heading_pairs)
             main_requests, table_fills, _ = builder.collect_all_requests(gdoc_root)
 
-            text_len = builder._cursor - insert_at
-
+            # Keep track of text inserted, but DO NOT expand named range to cover it
             all_main_requests.extend(main_requests)
-            #all_table_fills.extend(table_fills)
 
-            # Update named range to cover newly inserted content
+            # FIXED: Recreate named range anchored ONLY to the label string length
+            protected_len = self.text_utf16_len(f"{heading}:")
+            
             all_main_requests.extend([
                 {'deleteNamedRange': {'name': heading}},
                 {
@@ -806,18 +831,14 @@ class GoogleDocsEditor(GoogleDocsAPI):
                         'name': heading,
                         'range': {
                             'startIndex': start_index,
-                            'endIndex': max(start_index + 1, insert_at + text_len - 1)
+                            'endIndex': start_index + protected_len
                         }
                     }
                 }
             ])
-
-        print(f"Total main requests: {len(all_main_requests)}")
-        #print(f"Total table fill requests: {len(all_table_fills)}")
-
+            
         if all_main_requests:
-            self.batch_update(all_main_requests)
-            print("Main batchUpdate complete.")
+            self.batch_update(requests=all_main_requests)
 
         #if all_table_fills:
             #self.batch_update(all_table_fills)

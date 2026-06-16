@@ -94,6 +94,7 @@ class GdocTreeBuilder:
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, mode)
 
+
         elif node_type == "LIST_ITEM":
             # LIST_ITEM is a structural wrapper — only its PARA children render
             for child in embed_node.children:
@@ -165,8 +166,6 @@ class GdocTreeBuilder:
         start_index = self._cursor
         requests = []
  
-        # Loop over every style span run inside the paragraph
-        # Collect text style requests separately
         text_style_requests = []
         for text_segment, style in runs:
             if not text_segment:
@@ -188,42 +187,6 @@ class GdocTreeBuilder:
                     })
             self._cursor += seg_len
 
-        '''
-        for text_segment, style in runs:
-            if not text_segment:
-                continue
- 
-            if style.get("is_math"):
-                formula = text_segment.strip("$")
-                math_req = self._insert_inline_math_image(formula, self._cursor)
-                requests.append(math_req)
-                self._cursor += 1  # Inline assets count as exactly 1 unit space
-            else:
-                seg_len = _utf16_len(text_segment)
-                requests.append({
-                    "insertText": {
-                        "location": {"index": self._cursor},
-                        "text": text_segment,
-                    }
-                })
- 
-                # Separate out text styling parameters from custom engine tracking flags
-                text_styles = {k: v for k, v in style.items() if k != "is_math"}
-                if text_styles:
-                    print(f"Style request: {text_styles} over [{self._cursor}, {self._cursor + seg_len}]")
-                if text_styles:
-                    requests.append({
-                        "updateTextStyle": {
-                            "textStyle": text_styles,
-                            "fields": ",".join(text_styles.keys()),
-                            "range": {
-                                "startIndex": self._cursor,
-                                "endIndex": self._cursor + seg_len
-                            }
-                        }
-                    })
-                self._cursor += seg_len
-        '''
         # Insert structural spacing suffix
         suffix_len = _utf16_len(suffix)
         requests.append({
@@ -235,10 +198,12 @@ class GdocTreeBuilder:
         self._cursor += suffix_len
         total_block_len = self._cursor - start_index
  
-        # Structural layout indents matching depth tree locations
-        bullet_indent = depth * _INDENT_PT
-        text_indent   = (depth + 1) * _INDENT_PT
-        if not list_mode:
+        # UPDATED: Structural layout indents bumped by one full tab stop (36pt) if a list
+        if list_mode:
+            bullet_indent = (depth + 2) * _INDENT_PT
+            text_indent   = (depth + 2) * _INDENT_PT
+        else:
+            text_indent   = (depth + 1) * _INDENT_PT
             bullet_indent = text_indent
  
         if list_mode:
@@ -266,7 +231,7 @@ class GdocTreeBuilder:
             }
         })
  
-        requests.append(text_style_requests)
+        requests.extend(text_style_requests)
         gdoc_node.requests = requests
  
     def _gen_table(self, gdoc_node: GdocTreeNode, depth: int) -> None:
