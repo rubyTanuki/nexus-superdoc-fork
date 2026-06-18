@@ -248,46 +248,52 @@ def test_render_to_gdocs(file_path):
 
 
 def test_render_to_gdocs2(file_path):
+    import time
     print(f"--- Processing: {file_path} ---")
- 
-    # PDF → Markdown
+    timings = []
+    
+    def log_time(name, start_time):
+        duration = time.time() - start_time
+        timings.append((name, duration))
+        print(f"-> {name} took {duration:.2f} seconds.")
+
+    # 1. PDF → Markdown
+    start = time.time()
     doc = pymupdf.open(file_path)
     md_text = pymupdf4llm.to_markdown(doc, force_markdown=True)
-    print('----Markdown----')
-    print(md_text)
-    print('----End-Of-MD---')
- 
-    # Shared AI client
-    ai = OpenAIProcessor()
- 
-    # Parse with Mistletoe + build semantic tree
+    log_time("PDF to Markdown Parsing", start)
+
+    # 2. Parse with Mistletoe + Build tree
+    start = time.time()
     mistletoe_doc = mistletoe.Document(md_text)
-    print("\nNESTED SEMANTIC TREE (The Stack Output)")
     with SemanticTreeBuilder() as builder:
         nested_tree = builder.render(mistletoe_doc)
- 
-    # Embed tree nodes
+    log_time("Semantic Tree Building", start)
+
+    # 3. Embed tree nodes
+    start = time.time()
+    ai = OpenAIProcessor()
     tembdr = TreeEmbedder(ai)
     tembdr.embed_tree(nested_tree)
-    print_semantic_tree(nested_tree)
-    print("\n" + "=" * 50)
- 
-    # Fetch existing DB headings
+    log_time("Tree Embedding", start)
+
+    # 4. Fetch DB headings
+    start = time.time()
     index_name = os.getenv("PINECONE_INDEX", "superdoc-headings")
     vec_db = VectorDBManager(pc=Pinecone(os.environ.get("PINECONE_API_KEY")))
     vec_db.initVectorStore(
         index_name=index_name,
         embedding=OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY"))
     )
-    COURSE_ID = "Goof1202"
     DOCUMENT_ID = "1Q1whz1kFN9wj1_mamWgaDbKh7przNmc5owdOSNovC04"
     existing_headings = vec_db.get_all_headings_for_doc(
-        course_id=COURSE_ID,
+        course_id="Goof1202",
         superdoc_id=DOCUMENT_ID
     )
-    print(f"Fetched {len(existing_headings)} existing headings from DB.")
- 
-    # Run merge / reconciliation
+    log_time("DB Heading Fetch", start)
+
+    # 5. Semantic Reconciliation
+    start = time.time()
     smr = SemanticReconciler(
         embedding_service=ai,
         llm_service=ai,
@@ -297,40 +303,26 @@ def test_render_to_gdocs2(file_path):
     new_cust_nodes, all_render_nodes, node_heading_pairs = smr.reconcile_structure(
         nested_tree, existing_headings
     )
- 
-    print(f"\n--- Reconciliation Results ---")
-    print(f"New headings to insert into DB : {len(new_cust_nodes)}")
-    for node in new_cust_nodes:
-        print(f"  + {node.content!r}")
-    print(f"All render nodes (deduplicated): {len(all_render_nodes)}")
-    for node in all_render_nodes:
-        matched = node_heading_pairs.get(node)
-        label = node.content.strip()[:60] if node.content else repr(node)
-        status = f"[MATCHED: {matched}]" if matched else "[UNMATCHED]"
-        print(f"  {status} {label}")
- 
-    print(f"\n--- All Render Node Trees (post-reconciliation) ---")
-    for i, node in enumerate(all_render_nodes):
-        matched = node_heading_pairs.get(node)
-        status = f"[MATCHED: {matched}]" if matched else "[UNMATCHED]"
-        print(f"\n[Render Node {i+1}] {status}")
-        parent_label = f"{node.parent.type} | {node.parent.content}" if node.parent else "None"
-        print(f"  parent: {parent_label}")
-        print_semantic_tree(node)
+    log_time("Semantic Reconciliation", start)
 
-    print("\n" + "=" * 50)
-
-    # --- Render all branches to Google Docs ---
-    print(f"\n--- Rendering {len(all_render_nodes)} branch(es) to Google Doc ---")
+    # 6. Render to Google Docs
+    start = time.time()
     gdoc_editor = GoogleDocsEditor()
-    #gdoc_editor.clear_document(superdoc_id=DOCUMENT_ID)
     gdoc_editor.render_trees(
         superdoc_id=DOCUMENT_ID,
         all_render_nodes=all_render_nodes,
         node_heading_pairs=node_heading_pairs
     )
-    print(f"\n--- render_trees() complete ---")
+    log_time("Google Docs Rendering", start)
 
+    # --- Print Performance Summary ---
+    print("\n" + "="*50)
+    print("PERFORMANCE SUMMARY (Sorted by time):")
+    # Sort by duration descending
+    sorted_timings = sorted(timings, key=lambda x: x[1], reverse=True)
+    for name, duration in sorted_timings:
+        print(f"{name:<30} : {duration:.2f}s")
+    print("="*50 + "\n")
 
 def test_table_structure(file_path):
     """
@@ -699,5 +691,5 @@ def _print_request(req_type: str, details: dict, prefix: str) -> None:
 
 if __name__ == "__main__":
     # Change this to your actual file path
-    test_render_to_gdocs2("files/basic-text.pdf")
+    test_render_to_gdocs2("files/2301.07041v2.pdf")
     #test_show_structure("files/basic-text.pdf")

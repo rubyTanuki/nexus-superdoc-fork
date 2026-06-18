@@ -332,6 +332,7 @@ def find_closest_cosine_sim(query_vec,list_vecs)->tuple[int,float]:
     similarities = np.dot(list_norms,query_norm)
     closest_idx = np.argmax(similarities)
     return closest_idx,similarities[closest_idx]
+
 def get_sampled_text(batch: list, chunk_size: int = 30) -> str:
     """
     Assembles all text content from a batch of EmbedTreeNodes (and their

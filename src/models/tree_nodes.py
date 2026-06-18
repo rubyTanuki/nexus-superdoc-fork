@@ -40,7 +40,7 @@ class EmbedTreeNode:
                 return token.content
 
             # Only recurse into inline formatting (Strong, Emphasis, etc.)
-            if isinstance(token, SpanToken) and hasattr(token, 'children'):
+            if isinstance(token, SpanToken) and hasattr(token, 'children') and token.children is not None:
                 return "".join(_extract_inline(c) for c in token.children)
 
             return ""

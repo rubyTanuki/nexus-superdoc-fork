@@ -22,6 +22,7 @@ from io import BytesIO
 from collections import defaultdict
 
 #from dynamodb.dynamodb import append_to_course_docs, fetch_all_course_docs
+
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/documents","https://www.googleapis.com/auth/drive.file"] # Use full scope like 'https://www.googleapis.com/auth/documents' for write operations
 
@@ -83,63 +84,6 @@ class GoogleDocsAPI:
         
         return (doc_service, drive_service)
         
-class GoogleDriveImageEditor(GoogleDocsAPI): 
-    def __init__(self):
-        super().__init__()
-    
-    def upload_image_bytes(self, image_bytes, filename="equation.png", folder_id=None):
-        """
-        Uploads raw image bytes directly from memory to Google Drive.
-        """
-        file_metadata = {'name': filename}
-        
-        # If you want to nest it under a specific directory/folder
-        if folder_id:
-            file_metadata['parents'] = [folder_id]
-
-        # Wrap the raw bytes in an in-memory stream wrapper
-        media = MediaIoBaseUpload(
-            io.BytesIO(image_bytes), 
-            mimetype='image/png', 
-            resumable=True
-        )
-
-        # Execute the upload request
-        uploaded_file = self.drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webContentLink'
-        ).execute()
-
-        print(f"Successfully uploaded {filename} to Drive. ID: {uploaded_file.get('id')}")
-        return uploaded_file  # Returns a dict with 'id' and 'webContentLink'
-
-    def upload_local_file(self, filepath, filename=None, folder_id=None):
-        """
-        Alternative method if you are saving images locally first.
-        """
-        import os
-        if not filename:
-            filename = os.path.basename(filepath)
-
-        file_metadata = {'name': filename}
-        if folder_id:
-            file_metadata['parents'] = [folder_id]
-
-        media = MediaFileUpload(
-            filepath, 
-            mimetype='image/png', 
-            resumable=True
-        )
-
-        uploaded_file = self.drive_service.files().create(
-            body=file_metadata,
-            media_body=media,
-            fields='id, webContentLink'
-        ).execute()
-
-        return uploaded_file
-
 
         
 class GoogleDocsEditor(GoogleDocsAPI):
@@ -190,30 +134,7 @@ class GoogleDocsEditor(GoogleDocsAPI):
         start_index = named_range['namedRanges'][0]['ranges'][0]['startIndex']
         end_index = named_range['namedRanges'][0]['ranges'][0]['endIndex']
         return self.get_text_in_indices_from_doc_obj(start_index=start_index,end_index=end_index)
-        '''
-        extracted = []
-        content = self.doc.get('body').get('content', [])
-
-        for element in content:
-            el_start = element.get('startIndex')
-            el_end = element.get('endIndex')
-
-            if el_start is not None and el_end is not None:
-                if el_start < end_index and el_end > start_index:
-                    if 'paragraph' in element:
-                        for part in element['paragraph']['elements']:
-                            if 'textRun' in part:
-                                text = part['textRun']['content']
-                                p_start = part.get('startIndex')
-
-                                rel_start = max(0, start_index - p_start)
-                                rel_end = min(len(text), end_index - p_start)
-
-                                if rel_start < rel_end:
-                                    extracted.append(text[rel_start:rel_end])
-        return "".join(extracted)
-        '''
-
+        
     def create_google_doc(self, name:str, courseid:str):
         """
         Creates a new Google Doc, logs the ID to DynamoDB, and sets global 
@@ -332,7 +253,7 @@ class GoogleDocsEditor(GoogleDocsAPI):
         #endIndex = startIndex+newHeadingLen
         
         protected_text = f"{new_heading}:"
-        padding = "\n\n"
+        padding = "\n"
         full_text = protected_text + padding
         
         # Calculate indices based on specific parts
@@ -428,7 +349,7 @@ class GoogleDocsEditor(GoogleDocsAPI):
             return
 
         #CRITICAL: Sort by startIndex in REVERSE order.
-        # This prevents text shifts from breaking our index calculations!
+        # This prevents text shifts from breaking our index calculations
         headings_sorted = sorted(headings_to_apply, key=lambda x: x['startIndex'], reverse=True)
         
         all_requests = []
@@ -771,7 +692,7 @@ class GoogleDocsEditor(GoogleDocsAPI):
         Renders a list of EmbedTreeNode branches into a Google Doc using GdocTreeBuilder.
         1. Ensures headings exist in the Doc.
         2. Builds GdocTree for each branch using the new renderer.
-        3. Fires main requests, then table fill requests in two separate batchUpdates.
+        3. Fires main requests for each branch, anchored to the correct heading via named ranges.
         """
         print(f"Connecting to Google Doc: {superdoc_id}")
         self.get_document_structure(document_id=superdoc_id)
@@ -870,167 +791,13 @@ class GoogleDocsEditor(GoogleDocsAPI):
                 }
             }])
 
-    def render_etree_custom_nodes(self,superdoc_id:str,all_cust_nodes:list[EmbedTreeNode]): 
-        """
-        The main rendering pipeline. 
-        1. Ensures headings exist in the Doc.
-        2. Converts semantic 'EmbedTreeNodes' into 'GdocTreeNodes'.
-        3. Generates batched text and formatting requests.
-        4. Executes a massive batchUpdate to sync the PDF content into the Google Doc sections.
-        """
-        print(f"Connecting to Google Doc: {superdoc_id}")
-        self.get_document_structure(document_id=superdoc_id) # Set the active document
-
-        headings = [node.content for node in all_cust_nodes]
-        headings.reverse()
-        print(f"RECIEVED HEADINGS:{headings}") 
-        self.create_headings(headings)
-        self.get_document_structure(document_id=superdoc_id)
-        ranges = [self.find_named_range(heading) for heading in headings] 
-        ranges.reverse()
-        print(f"Ranges: {ranges}")
-        # Before converting to Gdoc
-        for i, node in enumerate(all_cust_nodes):
-            print(f"ETREE Node {i} type: {node.type}, children count: {len(node.children)}")
-
-        gdoc_branches = [GdocTreeNode._init_tree(etree=node) for node in all_cust_nodes]
-
-        # After converting
-        for i, branch in enumerate(gdoc_branches):
-            print(f"GDOC Branch {i} type: {branch.type}, children count: {len(branch.children)}")
-
-        # Debug: Check if branches have children
-        for i, branch in enumerate(gdoc_branches):
-            print(f"Branch {i} ({all_cust_nodes[i].content}): {len(branch.children)} children")
-    
-
-
-
-        text_requests = []
-        format_requests = []
-        range_dict = {}
-        req_per_heading = defaultdict(list)
-        for branch, range in zip(gdoc_branches, ranges): 
-            #print(f"Heading range{range}")
-            heading = branch.content
-            #print(branch)
-            
-            if heading in range_dict: 
-                # Use previously calculated indices if we've already touched this heading
-                startIndex = range_dict[heading]['startIndex']
-                endIndex = range_dict[heading]['endIndex'] -1
-                code = 0
-            else:
-                # Look up the heading's location in the freshly updated doc
-                startIndex = range['namedRanges'][0]['ranges'][0]['startIndex']
-                endIndex = range['namedRanges'][0]['ranges'][0]['endIndex']
-
-
-            #startIndex = range['namedRanges'][0]['ranges'][0]['startIndex']
-            #endIndex = range['namedRanges'][0]['ranges'][0]['endIndex']
-            print(f"\nGDOC BRANCH: {branch}\n\n")
-            (branch_text_requests, branch_format_requests, text_len) = branch.generate_formatted_requests(start_index=endIndex)#branch.generate_custom_branch_requests(startIndex=startIndex,endIndex=endIndex)
-            req_per_heading[heading].append(branch_text_requests)
-            req_per_heading[heading].append(branch_format_requests)
-            text_requests.append(branch_text_requests)
-            format_requests.append(branch_format_requests)
-
-            range_dict[heading] ={
-                    'startIndex' : startIndex, 
-                    'endIndex' : endIndex + text_len
-                }
-
-
-        #Need to make a final set named range fixer here:
-
-        #sorting custom_node delimited branches in reverse order so that the branches get appened right
-        #print(text_requests)
-        text_requests = [req for req in text_requests if len(req)!=0]
-
-        sorted_heading_ranges = sorted(range_dict.items(), 
-                    key= lambda x: x[1]['startIndex'],
-                                reverse=True)
-        print(f"Sorted heading ranges: {sorted_heading_ranges}")
-        text_and_format_requests = []
-        for (heading,heading_range) in sorted_heading_ranges:
-            startIndex = range_dict[heading]['startIndex']
-            endIndex = range_dict[heading]['endIndex']
-
-            for requests in req_per_heading[heading]:
-                text_and_format_requests.extend(requests)
-            text_and_format_requests.extend([
-                {'deleteNamedRange': {'name': heading}},                  
-                {
-                    'createNamedRange': {
-                        'name': heading,
-                        'range': {
-                            'startIndex': startIndex,
-                            'endIndex': max(startIndex + 1, endIndex - 1)
-                        }
-                    }   
-                }
-            ])
-       
-     
-        batch_all_requests = text_and_format_requests
-        print(f"Len of all requests:{len(batch_all_requests)}")
-      
-        self.batch_update(batch_all_requests)
-        print(f"FINISHED BATCH UPDATE")
-
-    def append_italic_text(self, text: str):
-        """
-        Appends italicized text to the end of the document.
-        """
-        doc = self.doc_service.documents().get(documentId=self.document_id).execute()
-        body_content = doc.get('body', {}).get('content', [])
-        insert_index = body_content[-1].get('endIndex', 1) - 1
-
-        text_to_insert = text + "\n"
-        text_len = self.text_utf16_len(text_to_insert)
-
-        requests = [
-            {
-                'insertText': {
-                    'location': {'index': insert_index},
-                    'text': text_to_insert
-                }
-            },
-            {
-                'updateTextStyle': {
-                    'range': {
-                        'startIndex': insert_index,
-                        'endIndex': insert_index + text_len
-                    },
-                    'textStyle': {'italic': True},
-                    'fields': 'italic'
-                }
-            }
-        ]
-
-        self.batch_update(requests=requests)
-
-def _shift_requests(requests: list[dict], delta: int) -> list[dict]:
-    """Shifts all index values in a list of Docs API requests by delta."""
-    import copy
-
-    def _shift_dict(d: dict):
-        for k, v in d.items():
-            if k in ('index', 'startIndex', 'endIndex') and isinstance(v, int):
-                d[k] += delta
-            elif isinstance(v, dict):
-                _shift_dict(v)
-
-    shifted = copy.deepcopy(requests)
-    for r in shifted:
-        _shift_dict(r)
-    return shifted
-
 def main():
     """Main entry point for local debugging."""
     gde = GoogleDocsEditor()
     gde.get_document_structure(document_id="1Q1whz1kFN9wj1_mamWgaDbKh7przNmc5owdOSNovC04")
     gde.append_italic_text("This is a test of the italic text insertion function.")
     pass
+
+
 if __name__ == "__main__":
     main()

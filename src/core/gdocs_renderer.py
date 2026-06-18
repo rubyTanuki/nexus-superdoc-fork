@@ -18,7 +18,7 @@ _HEADING_STYLE = {
 }
  
 # Indentation per depth level in points
-_INDENT_PT = 36
+_INDENT_PT = 13
  
  
 class GdocTreeBuilder:
