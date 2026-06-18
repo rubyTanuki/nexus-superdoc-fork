@@ -73,6 +73,7 @@ humanfriendly==10.0
 idna==3.10
 imageio==2.37.0
 importlib_metadata==8.7.1
+iniconfig==2.3.0
 iso8601==2.1.0
 itsdangerous==2.2.0
 Jinja2==3.1.6
@@ -189,6 +190,7 @@ pyOpenSSL==25.3.0
 pyparsing==3.2.3
 pypdfium2==4.30.0
 pyperclip==1.11.0
+pytest==9.1.0
 python-barbicanclient==7.2.0
 python-bidi==0.6.6
 python-cinderclient==9.8.0

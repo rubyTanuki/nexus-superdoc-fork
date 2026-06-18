@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from mistletoe.block_token import BlockToken, List as MistletoeList, Table, Heading, Paragraph, ListItem
 from mistletoe.span_token import SpanToken, RawText, Strong, Emphasis
 
-from src.models.tree_nodes import EmbedTreeNode, GdocTreeNode, _utf16_len
+from models.tree_nodes import EmbedTreeNode, GdocTreeNode, _utf16_len
 
 # ---------------------------------------------------------------------------
 # Heading level → Google Docs named style
@@ -115,6 +115,7 @@ class GdocTreeBuilder:
             # Unknown structural node — recurse without rendering
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, list_mode)
+    
     # ------------------------------------------------------------------
     # Request generators (each mutates self._cursor)
     # ------------------------------------------------------------------

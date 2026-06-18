@@ -1,7 +1,7 @@
 from mistletoe.base_renderer import BaseRenderer
 from mistletoe.block_token import Heading
 
-from src.models.tree_nodes import EmbedTreeNode
+from models.tree_nodes import EmbedTreeNode
 
 
 class SemanticTreeBuilder(BaseRenderer):

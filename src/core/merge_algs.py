@@ -1,8 +1,8 @@
-from src.models.tokens import CustomHeading
-from src.models.tree_nodes import EmbedTreeNode
+from models.tokens import CustomHeading
+from models.tree_nodes import EmbedTreeNode
 from mistletoe.span_token import RawText
-from src.services.openai_client import OpenAIProcessor
-from src.services.pinecone_client import DB_Heading
+from services.openai_client import OpenAIProcessor
+from services.pinecone_client import DB_Heading
 
 from mistletoe.block_token import BlockToken
 from mistletoe.span_token import SpanToken, RawText

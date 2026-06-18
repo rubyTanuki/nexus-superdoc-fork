@@ -362,27 +362,46 @@ class VectorDBManager(BaseModel):
         except Exception as e:
             raise Exception(f"Failed to delete vector DB heading: {str(e)}")                            
 
-    def append_documents(self,e_branches:list[EmbedTreeNode],course_id:str,superdoc_id:str):
+    def append_documents(self, e_branches: list, course_id: str, superdoc_id: str):
         """
-        Batch-uploads semantic branches of an EmbedTree. 
-        Uses the branch's 'mean_emb' (the centroid of all its children) as the vector.
+        Batch-uploads semantic branches of an EmbedTree.
+        Uses the branch's 'embedding' (the centroid calculated by SemanticReconciler) as the vector.
         """
-        if len(e_branches)==0:
+        if not e_branches:
             return
+    
         index = self.pc.Index(self.index_name)
-        filtered_docs = ""
-        print(f"Append Documents branch check")
-        #for branch in e_branches:
-        #    print(branch)
-        
-        index.upsert(
-            vectors=[{
-                "id":self.generate_timestamp_id(course_id), 
-                "values": branch.mean_emb,
-                "metadata": {"superdoc":superdoc_id,"heading":branch.content}
-                    
-            } for branch in e_branches],
-            namespace=course_id)           
+    
+        valid_branches = []
+        for branch in e_branches:
+            emb = getattr(branch, 'embedding', None)
+            content = getattr(branch, 'content', None)
+    
+            if emb is None:
+                print(f"[WARN] Skipping branch '{content}' — embedding is None")
+                continue
+            if content is None:
+                print(f"[WARN] Skipping branch — content is None")
+                continue
+            
+            # Convert numpy array to plain list for Pinecone
+            if hasattr(emb, 'tolist'):
+                emb = emb.tolist()
+    
+            valid_branches.append({
+                "id": self.generate_timestamp_id(course_id),
+                "values": emb,
+                "metadata": {
+                    "superdoc": superdoc_id,
+                    "heading": content
+                }
+            })
+    
+        if valid_branches:
+            print(f"Append Documents: upserting {len(valid_branches)} branches")
+            index.upsert(vectors=valid_branches, namespace=course_id)
+        else:
+            print("[WARN] append_documents: no valid branches to upsert after filtering")         
                 
 if __name__ == "__main__": 
     pass

@@ -10,13 +10,13 @@ import pymupdf4llm
 import pymupdf
 
 import mistletoe
-from src.core.semantic_renderer import SemanticTreeBuilder
-from src.core.merge_algs import TreeEmbedder, SemanticReconciler
-from src.core.gdocs_renderer import GdocTreeBuilder
-from src.models.tree_nodes import EmbedTreeNode, GdocTreeNode
-from src.services.openai_client import OpenAIProcessor
-from src.services.gdocs_client import GoogleDocsEditor
-from src.services.pinecone_client import VectorDBManager
+from core.semantic_renderer import SemanticTreeBuilder
+from core.merge_algs import TreeEmbedder, SemanticReconciler
+from core.gdocs_renderer import GdocTreeBuilder
+from models.tree_nodes import EmbedTreeNode, GdocTreeNode
+from services.openai_client import OpenAIProcessor
+from services.gdocs_client import GoogleDocsEditor
+from services.pinecone_client import VectorDBManager
 
 from lexical.lexical_algs import extract_text_similarity_jaccard
 from dotenv import load_dotenv
@@ -83,8 +83,8 @@ class superdoc():
         Tree-based merge: converts PDF → semantic tree → reconciles with
         existing DB headings → renders to Google Docs.
         """
-        print(f"--- Synchronizing Document ---")
-        self.sync_headings()
+        #print(f"--- Synchronizing Document ---")
+        #self.sync_headings()
         print(f"--- Starting Hierarchical Merge for Doc: {self.DOCUMENT_ID} ---")
 
         timings = []
@@ -159,6 +159,11 @@ class superdoc():
         '''
         # 6. Sync new headings to Vector DB
         if new_cust_nodes:
+            print(f"Embedding {len(new_cust_nodes)} new custom heading nodes...")
+            tembdr = TreeEmbedder(self.ai)
+            for node in new_cust_nodes:
+                tembdr.embed_tree(node)   # embed each branch in place
+
             print(f"Syncing {len(new_cust_nodes)} new custom headings to Pinecone...")
             self.db.append_documents(
                 e_branches=new_cust_nodes,
@@ -227,7 +232,9 @@ class superdoc():
 
         delete_ids = []
         headings_to_embed = []
-        print(f"Num of vector-db-headings: {doc_headings}")
+
+        #print text content of headings not the entire headings object
+        #print(f"Num of vector-db-headings: {doc_headings}")
 
         for db_entry in doc_headings:
             heading_text = db_entry.get("heading")

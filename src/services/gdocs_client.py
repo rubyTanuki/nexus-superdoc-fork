@@ -14,8 +14,8 @@ from googleapiclient.discovery import build, Resource
 from googleapiclient.errors import HttpError
 from langchain_core.documents import Document
 
-from src.models.tree_nodes import EmbedTreeNode
-from src.core.gdocs_renderer import GdocTreeBuilder
+from models.tree_nodes import EmbedTreeNode
+from core.gdocs_renderer import GdocTreeBuilder
 #from pdf_pipeline.gdoctree import GdocTreeNode
 from io import BytesIO
 
