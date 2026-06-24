@@ -42,9 +42,10 @@ def image_exists() -> bool:
 
 
 def ensure_image():
-    if not image_exists():
-        print(f"Image '{IMAGE}' not found, building first...")
-        build()
+    build()
+    #if not image_exists():
+    #    print(f"Image '{IMAGE}' not found, building first...")
+    #    build()
 
 
 def docker_run(cmd: list[str]):
