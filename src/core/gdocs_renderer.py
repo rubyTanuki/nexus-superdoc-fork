@@ -5,9 +5,9 @@ from mistletoe.span_token import SpanToken, RawText, Strong, Emphasis
 
 from models.tree_nodes import EmbedTreeNode, GdocTreeNode, _utf16_len
 
-# ---------------------------------------------------------------------------
+# 
 # Heading level → Google Docs named style
-# ---------------------------------------------------------------------------
+# 
 _HEADING_STYLE = {
     1: "HEADING_1",
     2: "HEADING_2",
@@ -42,9 +42,9 @@ class GdocTreeBuilder:
         """Pass your initialized GoogleDocsAPI instance into the renderer."""
         self.api = api_wrapper
  
-    # ------------------------------------------------------------------
+    # 
     # Public API
-    # ------------------------------------------------------------------
+    # 
  
     def build(
         self,
@@ -65,10 +65,10 @@ class GdocTreeBuilder:
  
         return gdoc_root
  
-    # ------------------------------------------------------------------
+    #     
     # Recursive visitor
-    # ------------------------------------------------------------------
- 
+    #
+
     def _visit(
         self,
         embed_node: EmbedTreeNode,
@@ -116,9 +116,9 @@ class GdocTreeBuilder:
             for child in embed_node.children:
                 self._visit(child, gdoc_node, matched_nodes, depth, list_mode)
     
-    # ------------------------------------------------------------------
+    # 
     # Request generators (each mutates self._cursor)
-    # ------------------------------------------------------------------
+    # 
  
     def _gen_heading(self, gdoc_node: GdocTreeNode, depth: int) -> None:
         text = gdoc_node.content.strip() + "\n"
@@ -298,9 +298,9 @@ class GdocTreeBuilder:
  
         self._cursor += text_len
 
-    # ------------------------------------------------------------------
+    # 
     # Inline Runs & Token Traversal Engine
-    # ------------------------------------------------------------------
+    # 
  
     def _extract_styled_runs(self, token) -> list[tuple[str, dict]]:
         """
@@ -365,9 +365,9 @@ class GdocTreeBuilder:
         return main_requests, table_fills, table_nodes
  
  
-# ---------------------------------------------------------------------------
+# 
 # Pure text extraction helpers (no side effects)
-# ---------------------------------------------------------------------------
+# 
  
 def _extract_text(token) -> str:
     if isinstance(token, RawText):

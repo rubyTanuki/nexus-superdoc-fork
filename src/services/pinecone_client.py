@@ -19,9 +19,9 @@ from lexical.lexical_algs import extract_text_similarity_jaccard
 
 
 
-from typing import List
+from typing import List, Any
 
-from pdf_pipeline.etree import EmbedTreeNode
+from models.tree_nodes import EmbedTreeNode
 from io import BytesIO
 '''
 Need this to, create tables automatically
@@ -31,11 +31,10 @@ In order to do the superdoc comparison alg properly
 
 '''
 class DB_Heading(BaseModel):
-        """Schema for headings retrieved from Pinecone/Database.""" 
-        id: str 
-        heading: Optional[str]
-        position: Optional[int]
-        embedding: List[float]
+    id: str
+    heading: Optional[str]
+    position: Optional[Any] = None  # deprecated, stored inconsistently, ignore it
+    embedding: List[float]
 
 
 

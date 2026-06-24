@@ -16,12 +16,11 @@ from langchain_core.documents import Document
 
 from models.tree_nodes import EmbedTreeNode
 from core.gdocs_renderer import GdocTreeBuilder
-#from pdf_pipeline.gdoctree import GdocTreeNode
 from io import BytesIO
 
 from collections import defaultdict
 
-#from dynamodb.dynamodb import append_to_course_docs, fetch_all_course_docs
+from dynamodb.dynamodb import append_to_course_docs, fetch_all_course_docs
 
 # If modifying these SCOPES, delete the file token.json.
 SCOPES = ["https://www.googleapis.com/auth/documents","https://www.googleapis.com/auth/drive.file"] # Use full scope like 'https://www.googleapis.com/auth/documents' for write operations

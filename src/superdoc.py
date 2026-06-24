@@ -1,7 +1,6 @@
 import numpy as np
 import re
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
-from vectordb.vector_db_manager import VectorDBManager
 from pinecone import Pinecone, IndexModel, ServerlessSpec
 
 from io import BytesIO

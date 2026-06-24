@@ -7,10 +7,10 @@ from models.tree_nodes import EmbedTreeNode
 class SemanticTreeBuilder(BaseRenderer):
     def __init__(self):
         super().__init__()
-        # 1. Create a dummy object to satisfy EmbedTreeNode's need for a class name
+        # Create a dummy object to satisfy EmbedTreeNode's need for a class name
         class RootToken: pass
         
-        # 2. Initialize with the dummy token
+        # Initialize with the dummy token
         self.root = EmbedTreeNode(RootToken(), level=0)
         self.root.type = "ROOT" # Manually override since RootToken.__name__ is 'RootToken'
         

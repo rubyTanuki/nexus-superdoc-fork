@@ -84,7 +84,9 @@ class SemanticReconciler:
         self.MIN_BLOCK_LEN = min_block_len
         self.mdit = MarkdownIt()
 
-    # --- 1. Matching Logic ---
+    #
+    # Matching logic
+    #
 
     def match_headings(self, root, db_headings: List[DB_Heading]) -> Dict['EmbedTreeNode', str]:
         """
@@ -124,9 +126,11 @@ class SemanticReconciler:
             for heading, node in [result]
         }
         return node_heading_pairs
-
-    # --- 2. Straggler Detection ---
-
+    
+    #
+    # Straggler Detection 
+    #
+    
     @staticmethod
     def find_straggler_branches(node, min_block_len: int) -> Generator[List['EmbedTreeNode'], None, None]:
         """
@@ -173,7 +177,9 @@ class SemanticReconciler:
         else:
             yield [node]
 
-    # --- 3. Surgery & Pruning ---
+    #
+    # Pruning
+    #
 
     def mark_structural_mismatch(self, node, target_heading: str, node_heading_pairs: dict):
         for child in node.children:
@@ -240,7 +246,7 @@ class SemanticReconciler:
 
     def reconcile_structure(self, root: 'EmbedTreeNode', db_headings: List[DB_Heading]) -> Tuple[list, list]:
         """
-        Orchestrates the semantic merge:
+        does the semantic merge:
         1. Injects LLM headings for orphans.
         2. Matches tree branches to database headings.
         3. Prunes mismatched content.
