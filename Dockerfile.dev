@@ -1,0 +1,18 @@
+# Dev-only image — not for Lambda deployment
+# Inherits the same base so the environment matches prod exactly
+FROM --platform=linux/amd64 public.ecr.aws/lambda/python:3.13
+
+ENV PIP_ROOT_USER_ACTION=ignore
+ENV PYTHONPATH=${LAMBDA_TASK_ROOT}/src
+
+WORKDIR ${LAMBDA_TASK_ROOT}
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
+RUN pip install --no-cache-dir pytest pytest-anyio
+
+COPY . .
+
+# Drop into bash by default — the test runner script overrides this
+ENTRYPOINT []
+CMD ["bash"]
