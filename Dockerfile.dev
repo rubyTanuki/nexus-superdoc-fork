@@ -11,7 +11,7 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --prefer-binary -r requirements.txt
 RUN pip install --no-cache-dir pytest pytest-anyio
 
-COPY . .
+#COPY . .
 
 # Drop into bash by default — the test runner script overrides this
 ENTRYPOINT []
