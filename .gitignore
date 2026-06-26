@@ -4,3 +4,7 @@ node_modules
 __pycache__
 *.json
 .pytest_cache
+
+.tostr/*
+
+.DS_Store
