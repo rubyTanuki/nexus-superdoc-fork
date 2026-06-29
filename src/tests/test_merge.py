@@ -12,6 +12,7 @@ Run all merge tests:
 
 import pytest
 import numpy as np
+from services.onnx_client import EMBED_DIM
 
 
 # --------------------------------------------------------------------------
@@ -64,9 +65,9 @@ class TestPipelineStages:
         for node in embedded:
             emb = getattr(node, 'embedding', None)
             assert emb is not None, f"Node '{node.content}' has has_embedding=True but embedding is None"
-            assert len(emb) == 1536, f"Expected 1536-dim embedding, got {len(emb)}"
+            assert len(emb) == EMBED_DIM, f"Expected {EMBED_DIM}-dim embedding, got {len(emb)}"
 
-        print(f"\n[PASS] {len(embedded)} nodes embedded at 1536 dims")
+        print(f"\n[PASS] {len(embedded)} nodes embedded at {EMBED_DIM} dims")
 
     def test_reconcile_returns_valid_structure(self, make_superdoc):
         """reconcile_structure returns three non-None values with consistent types."""
@@ -82,7 +83,7 @@ class TestPipelineStages:
         )
 
         smr = SemanticReconciler(
-            embedding_service=sd.ai,
+            embedding_service=sd.embedder,
             llm_service=sd.ai,
             similarity_threshold=0.97,
             min_block_len=20
@@ -116,7 +117,7 @@ class TestPipelineStages:
         )
 
         smr = SemanticReconciler(
-            embedding_service=sd.ai,
+            embedding_service=sd.embedder,
             llm_service=sd.ai,
             similarity_threshold=0.97,
             min_block_len=20
@@ -124,10 +125,15 @@ class TestPipelineStages:
         new_cust_nodes, _, _ = smr.reconcile_structure(nested_tree, existing_headings)
 
         for node in new_cust_nodes:
-            emb = getattr(node, 'embedding', None)
+            # append_documents stores the merkle centroid (mean_emb), falling back to
+            # the node's own .embedding. Container/straggler render nodes carry only
+            # mean_emb, so a usable vector is "mean_emb OR embedding".
+            emb = getattr(node, 'mean_emb', None)
+            if emb is None:
+                emb = getattr(node, 'embedding', None)
             assert emb is not None, (
-                f"Node '{getattr(node, 'content', '?')}' has no embedding — "
-                "append_documents will fail with ListConversionException"
+                f"Node '{getattr(node, 'content', '?')}' has neither mean_emb nor "
+                "embedding — append_documents would skip it"
             )
             # Pinecone requires a plain list, not ndarray
             converted = emb.tolist() if hasattr(emb, 'tolist') else emb

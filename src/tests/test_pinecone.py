@@ -9,14 +9,16 @@ Run:
 import pytest
 import numpy as np
 from unittest.mock import MagicMock, patch
+from services.onnx_client import EMBED_DIM
 
 
 class TestAppendDocuments:
 
     def test_append_documents_uses_embedding_not_mean_emb(self, make_superdoc):
         """
-        Regression test: append_documents must read branch.embedding (list/ndarray),
-        NOT branch.mean_emb (which is None in the new pipeline).
+        append_documents must get a usable vector for every render node. In the
+        merkle pipeline that vector is the section centroid (mean_emb), with the
+        node's own .embedding as a fallback — both are populated for render nodes.
         """
         from src.core.merge_algs import SemanticReconciler
 
@@ -30,7 +32,7 @@ class TestAppendDocuments:
         )
 
         smr = SemanticReconciler(
-            embedding_service=sd.ai,
+            embedding_service=sd.embedder,
             llm_service=sd.ai,
             similarity_threshold=0.97,
             min_block_len=20
@@ -40,15 +42,15 @@ class TestAppendDocuments:
         if not new_cust_nodes:
             pytest.skip("No new_cust_nodes produced — nothing to assert on")
 
-        # Verify none have mean_emb as their only embedding source
+        # Every render node must expose a usable vector to append_documents: the
+        # merkle centroid (mean_emb) or, as a fallback, its own .embedding.
         for node in new_cust_nodes:
             mean_emb = getattr(node, 'mean_emb', None)
             embedding  = getattr(node, 'embedding', None)
-            assert embedding is not None, (
-                f"Node '{getattr(node, 'content', '?')}' has no .embedding — "
-                "append_documents will raise ListConversionException"
+            assert (mean_emb is not None) or (embedding is not None), (
+                f"Node '{getattr(node, 'content', '?')}' has neither mean_emb nor "
+                ".embedding — append_documents would skip it"
             )
-            # mean_emb being None is fine — we no longer rely on it
             print(f"  node='{getattr(node, 'content', '?')[:40]}' "
                   f"embedding={embedding is not None} mean_emb={mean_emb is not None}")
 
@@ -58,7 +60,7 @@ class TestAppendDocuments:
         sd, _, _ = make_superdoc("basic-text.pdf")
 
         fake_node = MagicMock()
-        fake_node.embedding = np.random.rand(1536)
+        fake_node.embedding = np.random.rand(EMBED_DIM)
         fake_node.content = "Fake Heading For Test"
         fake_node.mean_emb = None
 
@@ -134,6 +136,6 @@ class TestGetAllHeadings:
         assert isinstance(headings, list)
         for h in headings:
             assert isinstance(h, DB_Heading), f"Expected DB_Heading, got {type(h)}"
-            assert len(h.embedding) == 1536, f"Heading '{h.heading}' has wrong embedding dim"
+            assert len(h.embedding) == EMBED_DIM, f"Heading '{h.heading}' has wrong embedding dim"
 
         print(f"\n[PASS] Fetched {len(headings)} DB_Heading objects with valid embeddings")

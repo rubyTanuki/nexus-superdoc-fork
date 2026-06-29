@@ -13,6 +13,7 @@ import os
 import mistletoe
 from io import BytesIO
 from pathlib import Path
+from services.onnx_client import EMBED_DIM
 
 FILES_DIR = Path(__file__).parent.parent / "files"
 
@@ -77,7 +78,7 @@ class TestTreeEmbedder:
             assert bl >= 0, f"Negative block_len on node '{node.type}'"
 
     def test_embedding_dimensions(self, make_superdoc):
-        """Embedded nodes must be exactly 1536-dimensional (text-embedding-3-small)."""
+        """Embedded nodes must be exactly EMBED_DIM-dimensional (local MiniLM = 384)."""
         sd, stream, _ = make_superdoc("basic-text.pdf")
         tree = sd.pdf_to_nested_tree(stream=stream)
         sd.embed_tree(tree)
@@ -89,7 +90,7 @@ class TestTreeEmbedder:
         assert len(embedded) > 0, "No nodes were embedded"
 
         for node in embedded:
-            assert len(node.embedding) == 1536, (
+            assert len(node.embedding) == EMBED_DIM, (
                 f"Node '{node.content[:40]}' has {len(node.embedding)}-dim embedding"
             )
 
