@@ -22,6 +22,7 @@ from lexical.lexical_algs import extract_text_similarity_jaccard
 from typing import List, Any
 
 from models.tree_nodes import EmbedTreeNode
+from services.onnx_client import EMBED_DIM
 from io import BytesIO
 '''
 Need this to, create tables automatically
@@ -47,28 +48,33 @@ class VectorDBManager(BaseModel):
     pc:Pinecone
     vs:Optional[PineconeVectorStore] = None
     index_name:Optional[str] = None
+    embedder:Optional[Any] = None
     model_config = {"arbitrary_types_allowed" : True}
 
 
-    def initVectorStore(self,index_name:str,embedding:OpenAIEmbeddings):
-        """Connects to an existing Pinecone index and initializes the LangChain wrapper."""
-        if not self.pc.has_index(index_name): 
-            raise ValueError(f"Index:{index_name}, does not exist")
+    def initVectorStore(self,index_name:str,embedding):
+        """Connects to a Pinecone index (creating it at EMBED_DIM if missing) and
+        initializes the LangChain wrapper. Auto-create keeps the prototype's separate
+        384-dim index provisioned without touching any shared 1536-dim index."""
+        if not self.pc.has_index(index_name):
+            print(f"Index '{index_name}' not found — creating it at dim={EMBED_DIM}.")
+            self.createIndex(index_name)
         index = self.pc.Index(index_name)
         self.vs = PineconeVectorStore(index=index,embedding=embedding)
-        self.index_name = index_name        
-    
-    
+        self.index_name = index_name
+        self.embedder = embedding
+
+
     def createIndex(self,index_name:str):
         """Provisions a new Serverless Pinecone index optimized for cosine similarity."""
-        if self.pc.has_index(index_name): 
+        if self.pc.has_index(index_name):
             raise ValueError(f"Index:{index_name}, already exists")
         self.pc.create_index(
             name=index_name,
-            dimension=1536,
+            dimension=EMBED_DIM,
             metric="cosine",
             spec=ServerlessSpec(cloud="aws", region="us-east-1"),
-        )    
+        )
         return self.pc.Index(index_name)
     
     def generate_timestamp_id(self,course_id):
@@ -135,10 +141,9 @@ class VectorDBManager(BaseModel):
             Exception: If embedding generation or creation fails
         """
         try:
-            # Generate OpenAI embedding for the heading text
-            embeddings = OpenAIEmbeddings()
-            embedding = embeddings.embed_query(heading_text)
-    
+            # Generate the heading embedding with the configured (local ONNX) embedder.
+            embedding = self.embedder.embed_query(heading_text)
+
             print(f"Generated embedding for heading: '{heading_text}' (dimension: {len(embedding)})")
     
             index = self.pc.Index(self.index_name)
@@ -184,7 +189,7 @@ class VectorDBManager(BaseModel):
             response = index.query(
                 top_k=100,
                 filter={"superdoc": superdoc_id, "heading": heading},
-                vector=[0] * 1536,  # Default OpenAI embedding dimension
+                vector=[0] * EMBED_DIM,  # dummy vector for filter-only query
                 namespace=course_id,
                 include_metadata=True
             )
@@ -217,10 +222,8 @@ class VectorDBManager(BaseModel):
             Exception: If embedding generation fails
         """
         try:
-            # Generate OpenAI embedding for the new heading text
-
-            embeddings = OpenAIEmbeddings()
-            new_embedding = embeddings.embed_query(new_heading_text)
+            # Generate the new heading embedding with the configured (local ONNX) embedder.
+            new_embedding = self.embedder.embed_query(new_heading_text)
 
             print(f"Generated embedding for new heading: '{new_heading_text}' (dimension: {len(new_embedding)})")
 
@@ -308,7 +311,7 @@ class VectorDBManager(BaseModel):
             # Since we want ALL headings, we set top_k to a high number (e.g., 1000).
             response = index.query(
                 namespace=course_id,
-                vector=[0.0] * 1536,  # Dummy vector for filter-based search
+                vector=[0.0] * EMBED_DIM,  # Dummy vector for filter-based search
                 filter={
                     "superdoc": superdoc_id
                 },
@@ -347,7 +350,7 @@ class VectorDBManager(BaseModel):
             response = index.query(
                 top_k=100,
                 filter={"superdoc": superdoc_id, "heading": heading},
-                vector=[0] * 1536,
+                vector=[0] * EMBED_DIM,
                 namespace=course_id,
                 include_metadata=True
             )
@@ -373,9 +376,13 @@ class VectorDBManager(BaseModel):
     
         valid_branches = []
         for branch in e_branches:
-            emb = getattr(branch, 'embedding', None)
+            # Prefer the merkle section centroid (mean_emb); fall back to the node's
+            # own vector. This is the vector stored as the heading's representation.
+            emb = getattr(branch, 'mean_emb', None)
+            if emb is None:
+                emb = getattr(branch, 'embedding', None)
             content = getattr(branch, 'content', None)
-    
+
             if emb is None:
                 print(f"[WARN] Skipping branch '{content}' — embedding is None")
                 continue

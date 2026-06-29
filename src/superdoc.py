@@ -14,6 +14,7 @@ from core.merge_algs import TreeEmbedder, SemanticReconciler
 from core.gdocs_renderer import GdocTreeBuilder
 from models.tree_nodes import EmbedTreeNode, GdocTreeNode
 from services.openai_client import OpenAIProcessor
+from services.onnx_client import OnnxProcessor
 from services.gdocs_client import GoogleDocsEditor
 from services.pinecone_client import VectorDBManager
 
@@ -31,7 +32,10 @@ class superdoc():
         self,
         DOCUMENT_ID: str | None,
         COURSE_ID: str,
-        index_name=os.getenv("PINECONE_INDEX", "superdoc-headings")
+        # Prototype uses its OWN 384-dim index, separate from the shared 1536-dim
+        # "superdoc-headings" index, so the local-embedding refactor never collides
+        # with teammates' data. Override via PINECONE_PROTOTYPE_INDEX if needed.
+        index_name=os.getenv("PINECONE_PROTOTYPE_INDEX", "superdoc-headings-minilm-384")
     ):
         self.DOCUMENT_ID = DOCUMENT_ID
         self.COURSE_ID = COURSE_ID
@@ -40,17 +44,21 @@ class superdoc():
         if DOCUMENT_ID is None:
             self.DOCUMENT_ID = self.docs_editor.create_google_doc(name=COURSE_ID).get('documentId')
 
+        # Local ONNX MiniLM embedder (384-dim) — replaces OpenAI for all embeddings.
+        # Loads the model once; no per-call API cost.
+        self.embedder = OnnxProcessor()
+
         self.db = VectorDBManager(pc=Pinecone(os.environ.get("PINECONE_API_KEY")))
         self.db.initVectorStore(
             index_name=index_name,
-            embedding=OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY"))
+            embedding=self.embedder
         )
 
         self.docs_editor.get_document_structure(document_id=self.DOCUMENT_ID)
 
-        # Shared AI processor (used for embeddings + LLM calls)
+        # OpenAI is retained for LLM heading *generation* only; all embeddings are local.
         self.ai = OpenAIProcessor()
-        self.emb_model = OpenAIEmbeddings(api_key=os.getenv("OPENAI_API_KEY"))
+        self.emb_model = self.embedder
 
     # ------------------------------------------------------------------
     #   PDF → Nested Tree
@@ -69,7 +77,7 @@ class superdoc():
 
     def embed_tree(self, nested_tree):
         """Embed all nodes in the nested tree using TreeEmbedder."""
-        tembdr = TreeEmbedder(self.ai)
+        tembdr = TreeEmbedder(self.embedder)
         tembdr.embed_tree(nested_tree)
         return nested_tree
 
@@ -116,7 +124,7 @@ class superdoc():
         # 4. Semantic Reconciliation
         start = time.time()
         smr = SemanticReconciler(
-            embedding_service=self.ai,
+            embedding_service=self.embedder,
             llm_service=self.ai,
             similarity_threshold=0.97,
             min_block_len=20

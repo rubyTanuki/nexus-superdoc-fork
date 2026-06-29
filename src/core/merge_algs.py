@@ -2,6 +2,7 @@ from models.tokens import CustomHeading
 from models.tree_nodes import EmbedTreeNode
 from mistletoe.span_token import RawText
 from services.openai_client import OpenAIProcessor
+from services.onnx_client import EMBED_DIM
 from services.pinecone_client import DB_Heading
 
 from mistletoe.block_token import BlockToken
@@ -17,6 +18,17 @@ MIN_BLOCK_LEN = 5
 SIMILARITY_THRESHOLD=0.97
 
 
+def _is_heading(node) -> bool:
+    """True for section-anchor nodes (markdown headings).
+
+    Used to tell heading anchors apart from content leaves now that *both* carry
+    embeddings — code must no longer infer "this is a heading" from the mere
+    presence of ``node.embedding``.
+    """
+    t = node.type.lower()
+    return t == "heading" or t.startswith("h")
+
+
 class TreeEmbedder:
     def __init__(self, openai_processor):
         """
@@ -24,36 +36,51 @@ class TreeEmbedder:
         """
         self.ai = openai_processor
 
-    def embed_tree(self, root):
-        # 1. Update lengths
+    def embed_tree(self, root, batch_size: int = 64):
+        # 1. Update subtree word counts (drives the MIN_BLOCK_LEN gate below).
         self._calculate_block_len(root)
 
-        # 2. Collect headings (case-insensitive and handling H1, H2, Heading)
-        headings = []
+        # 2. Collect every node that should carry its own content embedding:
+        #      - headings (section anchors), as before, and
+        #      - content leaves (PARA / TABLE / QUOTE / ...): nodes with no children.
+        #    Embedding the leaves is what gives the merkle roll-up real per-paragraph
+        #    signal instead of only heading text. Structural containers (LIST /
+        #    LIST_ITEM / ROOT) are skipped — their text lives in leaf descendants and
+        #    is captured there, so embedding them would double-count. Both kinds are
+        #    gated by MIN_BLOCK_LEN so trivially short fragments are skipped.
+        targets = []  # list[tuple[EmbedTreeNode, str]]
         for node in root.apply(lambda x: x):
-            t_lower = node.type.lower()
-            if (t_lower == 'heading' or t_lower.startswith('h')) and node.block_len >= MIN_BLOCK_LEN:
-                headings.append(node)
+            if node.type.lower() == "root" or node.block_len < MIN_BLOCK_LEN:
+                continue
+            is_leaf = not node.children
+            if not (_is_heading(node) or is_leaf):
+                continue
+            text = node.content
+            if text:
+                targets.append((node, text))
 
-        if not headings:
-            print("DEBUG: No headings met the MIN_BLOCK_LEN criteria.")
+        if not targets:
+            print("DEBUG: No nodes met the embedding criteria.")
             return
 
-        # 3. Extract text carefully using our Syntax helper
-        texts = [EmbedTreeNode(h.node).content for h in headings]
+        # 3. Sort by character length so each fixed-size batch holds similar-length
+        #    texts. The model pads every text in a batch up to the longest one, so
+        #    length-homogeneous batches minimize total padding -> less wasted compute.
+        targets.sort(key=lambda pair: len(pair[1]))
 
-        # 4. Request embeddings
-        embeddings = self.ai.embed_documents(texts) 
+        # 4. Embed in length-bucketed batches; assign each vector back to its node.
+        embedded = 0
+        for i in range(0, len(targets), batch_size):
+            chunk = targets[i:i + batch_size]
+            vectors = self.ai.embed_documents([t for _, t in chunk])
+            for (node, _), vec in zip(chunk, vectors):
+                node.embedding = vec
+                node.has_embedding = True
+                embedded += 1
 
-        # 5. Assign to the CORRECT slot (.embedding to match your printer)
-        for node, emb in zip(headings, embeddings):
-            node.embedding = emb # Match the slot name in EmbedTreeNode
-            node.has_embedding = True
-            # If you have a has_embedding slot, set it here
-            if hasattr(node, 'is_custom_node'): # using existing slots for state
-                pass 
-
-        print(f"DEBUG: Successfully embedded {len(headings)} headings.")
+        n_headings = sum(1 for n, _ in targets if _is_heading(n))
+        print(f"DEBUG: Embedded {embedded} nodes "
+              f"({n_headings} headings, {embedded - n_headings} leaves).")
 
     def _calculate_block_len(self, node):
         """
@@ -94,7 +121,7 @@ class SemanticReconciler:
         and existing headings in the database.
         """
         # Filter for valid embeddings
-        heading_vecs = np.array([h.embedding for h in db_headings if len(h.embedding) == 1536])
+        heading_vecs = np.array([h.embedding for h in db_headings if len(h.embedding) == EMBED_DIM])
         
         def check_node_against_headings(node):
             if heading_vecs.size == 0: 
@@ -105,12 +132,17 @@ class SemanticReconciler:
                 return None
             if node.block_len < self.MIN_BLOCK_LEN:
                 return None
-            # Check for embedding in the slot we defined
-            if node.embedding is None: 
+            # Only section anchors are matched against DB headings; leaf paragraph
+            # embeddings exist for the merkle roll-up, not for direct heading matching.
+            if not (_is_heading(node) or getattr(node, "is_custom_node", False)):
                 return None
-                
-            # Note: find_closest_cosine_sim needs to be available in scope
-            most_similar_idx, similarity = find_closest_cosine_sim(node.embedding, heading_vecs)
+            # Match on the section centroid (merkle roll-up); fall back to the node's
+            # own vector if the roll-up hasn't populated mean_emb for some reason.
+            node_vec = node.mean_emb if node.mean_emb is not None else node.embedding
+            if node_vec is None:
+                return None
+
+            most_similar_idx, similarity = find_closest_cosine_sim(node_vec, heading_vecs)
             
             if similarity < self.SIMILARITY_THRESHOLD:
                 return None   
@@ -141,9 +173,11 @@ class SemanticReconciler:
     
         # Boundary Check
         t_type = node.type.lower()
+        # NB: heading-ness is tested via type / is_custom_node, NOT via the presence
+        # of an embedding — content leaves now carry embeddings too and must not be
+        # mistaken for section boundaries.
         is_boundary = (
-            getattr(node, 'is_custom_node', False) or 
-            node.embedding is not None or 
+            getattr(node, 'is_custom_node', False) or
             t_type.startswith('h')
         )
     
@@ -157,8 +191,7 @@ class SemanticReconciler:
             current_group = []
             for child in node.children:
                 child_is_boundary = (
-                    getattr(child, 'is_custom_node', False) or 
-                    child.embedding is not None or 
+                    getattr(child, 'is_custom_node', False) or
                     child.type.lower().startswith('h') or
                     getattr(child, 'has_custom_node', False)
                 )
@@ -192,10 +225,13 @@ class SemanticReconciler:
     def mark_semantic_mismatch(self, node, anchor_vector: np.ndarray):
         if anchor_vector is None: return
         for child in node.children:
-            if child.embedding is not None:
-                norm_a, norm_c = np.linalg.norm(anchor_vector), np.linalg.norm(child.embedding)
+            # Compare the child's section centroid (merkle roll-up) to the anchor, so
+            # pruning reflects what the whole sub-branch is about, not just its heading.
+            child_vec = child.mean_emb if child.mean_emb is not None else child.embedding
+            if child_vec is not None:
+                norm_a, norm_c = np.linalg.norm(anchor_vector), np.linalg.norm(child_vec)
                 if norm_a > 0 and norm_c > 0:
-                    if (np.dot(anchor_vector, child.embedding) / (norm_a * norm_c)) < self.SIMILARITY_THRESHOLD:
+                    if (np.dot(anchor_vector, child_vec) / (norm_a * norm_c)) < self.SIMILARITY_THRESHOLD:
                         child.is_pruned = True
                         continue
             self.mark_semantic_mismatch(child, anchor_vector)
@@ -211,21 +247,40 @@ class SemanticReconciler:
 
     def _calc_mean_embedding(self, node):
         """
-        Calculates a 'Semantic Centroid' for each branch. 
-        It averages the embeddings of all children to create a vector 
-        representing the overall meaning of that section.
-        """ 
-        for child in node.children: 
-           self._calc_mean_embedding(child)
+        Weighted merkle roll-up of a 'Semantic Centroid' (``mean_emb``) for every node.
 
-        # Collect only non-None, non-zero embeddings from children
-        children_embs = [c.mean_emb for c in node.children if c.mean_emb is not None and np.any(c.mean_emb)]
+        Post-order: each node's ``mean_emb`` is the block_len-weighted average of
+            - its OWN content vector (``node.embedding``), weighted by its own word
+              count (subtree length minus children), and
+            - each child's ``mean_emb`` subtree centroid, weighted by the child's block_len.
 
-        current_emb = node.mean_emb if (node.mean_emb is not None and np.any(node.mean_emb)) else None
+        Writes ``mean_emb`` (NOT ``embedding``) so the raw per-node content vector is
+        preserved. Inputs are unit vectors; the weighted average need not be unit
+        length — every downstream consumer normalizes before taking cosine similarity.
+        """
+        for child in node.children:
+            self._calc_mean_embedding(child)
 
-        if children_embs or current_emb is not None:
-            all_vecs = children_embs + ([current_emb] if current_emb is not None else [])
-            node.embedding = np.mean(all_vecs, axis=0)
+        vecs, weights = [], []
+
+        # Own content contribution (headings + leaves have an embedding; containers don't).
+        children_total = sum(c.block_len for c in node.children)
+        own_len = max(node.block_len - children_total, 0)
+        if node.embedding is not None and np.any(node.embedding) and own_len > 0:
+            vecs.append(np.asarray(node.embedding, dtype=float))
+            weights.append(own_len)
+
+        # Children's subtree centroids.
+        for c in node.children:
+            if c.mean_emb is not None and np.any(c.mean_emb):
+                vecs.append(np.asarray(c.mean_emb, dtype=float))
+                weights.append(max(c.block_len, 1))
+
+        if vecs:
+            node.mean_emb = np.average(vecs, axis=0, weights=weights)
+        elif node.embedding is not None and np.any(node.embedding):
+            # Embedded node with no usable weights — fall back to its own vector.
+            node.mean_emb = np.asarray(node.embedding, dtype=float)
     
 
     def deduplicate_by_ancestry(self,nodes: list) -> list:
@@ -315,7 +370,12 @@ class SemanticReconciler:
         all_cust_nodes = main_tree_branches + pruned_nodes
         
         all_matched_nodes = set(node_heading_pairs.keys())
-        live_render_nodes = [n for n in root.apply(lambda n: n) if n.has_embedding]
+        # Render/DB nodes are heading anchors only. Leaves now also set has_embedding,
+        # so restrict to embedded headings to preserve the prior selection.
+        live_render_nodes = [
+            n for n in root.apply(lambda n: n)
+            if _is_heading(n) and n.has_embedding
+        ]
         all_render_nodes = self.deduplicate_by_ancestry(live_render_nodes + pruned_nodes)
 
         # New ones = not in DB yet (no match found)
