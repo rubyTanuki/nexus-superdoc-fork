@@ -33,7 +33,7 @@ class superdoc():
         COURSE_ID: str,
         # Prototype uses its OWN 384-dim index, separate from the shared 1536-dim
         # "superdoc-headings" index, so the local-embedding refactor never collides
-        # with teammates' data. Override via PINECONE_PROTOTYPE_INDEX if needed.
+        # with 1536-dim data. Override via PINECONE_PROTOTYPE_INDEX if needed.
         index_name=os.getenv("PINECONE_PROTOTYPE_INDEX", "superdoc-headings-minilm-384")
     ):
         self.DOCUMENT_ID = DOCUMENT_ID
@@ -44,7 +44,6 @@ class superdoc():
             self.DOCUMENT_ID = self.docs_editor.create_google_doc(name=COURSE_ID).get('documentId')
 
         # Local ONNX MiniLM embedder (384-dim) — replaces OpenAI for all embeddings.
-        # Loads the model once; no per-call API cost.
         self.embedder = OnnxProcessor()
 
         self.db = VectorDBManager(pc=Pinecone(os.environ.get("PINECONE_API_KEY")))

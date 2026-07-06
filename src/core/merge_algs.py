@@ -19,12 +19,6 @@ SIMILARITY_THRESHOLD=0.97
 
 
 def _is_heading(node) -> bool:
-    """True for section-anchor nodes (markdown headings).
-
-    Used to tell heading anchors apart from content leaves now that *both* carry
-    embeddings — code must no longer infer "this is a heading" from the mere
-    presence of ``node.embedding``.
-    """
     t = node.type.lower()
     return t == "heading" or t.startswith("h")
 
@@ -41,13 +35,8 @@ class TreeEmbedder:
         self._calculate_block_len(root)
 
         # 2. Collect every node that should carry its own content embedding:
-        #      - headings (section anchors), as before, and
+        #      - headings (section anchors), and
         #      - content leaves (PARA / TABLE / QUOTE / ...): nodes with no children.
-        #    Embedding the leaves is what gives the merkle roll-up real per-paragraph
-        #    signal instead of only heading text. Structural containers (LIST /
-        #    LIST_ITEM / ROOT) are skipped — their text lives in leaf descendants and
-        #    is captured there, so embedding them would double-count. Both kinds are
-        #    gated by MIN_BLOCK_LEN so trivially short fragments are skipped.
         targets = []  # list[tuple[EmbedTreeNode, str]]
         for node in root.apply(lambda x: x):
             if node.type.lower() == "root" or node.block_len < MIN_BLOCK_LEN:
@@ -253,10 +242,6 @@ class SemanticReconciler:
             - its OWN content vector (``node.embedding``), weighted by its own word
               count (subtree length minus children), and
             - each child's ``mean_emb`` subtree centroid, weighted by the child's block_len.
-
-        Writes ``mean_emb`` (NOT ``embedding``) so the raw per-node content vector is
-        preserved. Inputs are unit vectors; the weighted average need not be unit
-        length — every downstream consumer normalizes before taking cosine similarity.
         """
         for child in node.children:
             self._calc_mean_embedding(child)
@@ -268,7 +253,10 @@ class SemanticReconciler:
         own_len = max(node.block_len - children_total, 0)
         if node.embedding is not None and np.any(node.embedding) and own_len > 0:
             vecs.append(np.asarray(node.embedding, dtype=float))
-            weights.append(own_len)
+            if _is_heading(node):
+                    weights.append(max(own_len, 1) * 10)  # weight headings more heavily
+            else:
+                weights.append(max(own_len, 1))
 
         # Children's subtree centroids.
         for c in node.children:
@@ -370,8 +358,6 @@ class SemanticReconciler:
         all_cust_nodes = main_tree_branches + pruned_nodes
         
         all_matched_nodes = set(node_heading_pairs.keys())
-        # Render/DB nodes are heading anchors only. Leaves now also set has_embedding,
-        # so restrict to embedded headings to preserve the prior selection.
         live_render_nodes = [
             n for n in root.apply(lambda n: n)
             if _is_heading(n) and n.has_embedding

@@ -1,15 +1,3 @@
-"""Local ONNX MiniLM embedding processor.
-
-Drop-in replacement for ``OpenAIProcessor`` (``src/services/openai_client.py``):
-exposes the same ``embed_documents`` / ``embed_query`` surface, but runs
-``sentence-transformers/all-MiniLM-L6-v2`` locally via onnxruntime on CPU. No API
-calls, no per-token cost. Emits 384-dim, L2-normalized, mean-pooled vectors.
-
-The model weights (~86 MB) are downloaded from the Hugging Face Hub on first use
-and cached on disk. Set ``SUPERDOC_MODEL_DIR`` to point the cache at a mounted/baked
-path (e.g. a persistent Docker volume or a Lambda layer) so ephemeral containers do
-not re-download the model on every run.
-"""
 from __future__ import annotations
 
 import os
@@ -19,8 +7,6 @@ from pathlib import Path
 
 import numpy as np
 
-# Single source of truth for the embedding dimension. all-MiniLM-L6-v2 emits 384-dim
-# vectors; the Pinecone index, the match filter, and dummy query vectors all key off this.
 EMBED_DIM = 384
 
 _HF_BASE = "https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/main"
@@ -28,6 +14,7 @@ _ASSETS = {
     "model.onnx": f"{_HF_BASE}/onnx/model.onnx",
     "tokenizer.json": f"{_HF_BASE}/tokenizer.json",
 }
+
 # Minimum acceptable sizes catch truncated downloads before onnxruntime tries to parse them.
 _ASSET_MIN_SIZES = {
     "model.onnx": 50 * 1024 * 1024,  # fp32 model is ~86 MB
@@ -35,11 +22,11 @@ _ASSET_MIN_SIZES = {
 }
 _DOWNLOAD_HEADERS = {"User-Agent": "superdoc/1.0"}
 
-# all-MiniLM-L6-v2 was trained at a max sequence length of 256 tokens; longer inputs
-# are truncated so document paragraphs never overflow the model's position embeddings.
-_MAX_SEQ_LEN = 256
+# truncate to 256, as miniLM is only trained for 256 token sequences
+_MAX_SEQ_LEN = 256 
 
 
+# Needed for writing the local onnx weight cache download
 def _default_cache_dir() -> Path:
     override = os.getenv("SUPERDOC_MODEL_DIR")
     if override:
@@ -63,8 +50,6 @@ class OnnxProcessor:
 
         self._ensure_assets_present()
 
-        # Imported lazily so the module can be imported (and the download triggered)
-        # without paying onnxruntime's import cost until an embedder is constructed.
         import onnxruntime as ort
         from tokenizers import Tokenizer
 
@@ -132,12 +117,11 @@ class OnnxProcessor:
         if not texts:
             return []
 
-        # Fast Rust tokenization.
         encoded = self.tokenizer.encode_batch(texts)
 
         input_ids = np.array([e.ids for e in encoded], dtype=np.int64)
         attention_mask = np.array([e.attention_mask for e in encoded], dtype=np.int64)
-        # MiniLM expects a token-type index layer (all zeros for single-sentence input).
+        # miniLM expects a token-type index layer (all zeros for single-sentence input).
         token_type_ids = np.zeros_like(input_ids, dtype=np.int64)
 
         ort_inputs = {
