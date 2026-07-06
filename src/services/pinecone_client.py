@@ -1,5 +1,3 @@
-from langchain_pinecone import PineconeVectorStore
-from langchain_openai import OpenAIEmbeddings
 from langchain_community.utils.math import (
     cosine_similarity,
 )
@@ -46,7 +44,6 @@ class VectorDBManager(BaseModel):
     for document headings.
     """
     pc:Pinecone
-    vs:Optional[PineconeVectorStore] = None
     index_name:Optional[str] = None
     embedder:Optional[Any] = None
     model_config = {"arbitrary_types_allowed" : True}
@@ -54,13 +51,11 @@ class VectorDBManager(BaseModel):
 
     def initVectorStore(self,index_name:str,embedding):
         """Connects to a Pinecone index (creating it at EMBED_DIM if missing) and
-        initializes the LangChain wrapper. Auto-create keeps the prototype's separate
-        384-dim index provisioned without touching any shared 1536-dim index."""
+        stores the embedder for later heading embeds. Auto-create keeps the prototype's
+        separate 384-dim index provisioned without touching any shared 1536-dim index."""
         if not self.pc.has_index(index_name):
             print(f"Index '{index_name}' not found — creating it at dim={EMBED_DIM}.")
             self.createIndex(index_name)
-        index = self.pc.Index(index_name)
-        self.vs = PineconeVectorStore(index=index,embedding=embedding)
         self.index_name = index_name
         self.embedder = embedding
 
@@ -162,8 +157,6 @@ class VectorDBManager(BaseModel):
             index.upsert(vectors=[new_vector], namespace=course_id)
             print(f"Successfully created new entry with heading: '{heading_text}'")
     
-        except ImportError:
-            raise Exception("OpenAIEmbeddings not available. Please install langchain-openai")
         except Exception as e:
             raise Exception(f"Failed to create vector DB heading '{heading_text}': {str(e)}")
     
@@ -259,8 +252,6 @@ class VectorDBManager(BaseModel):
             index.upsert(vectors=[new_vector], namespace=course_id)
             print(f"Successfully created new entry with heading: '{new_heading_text}'")
 
-        except ImportError:
-            raise Exception("OpenAIEmbeddings not available. Please install langchain-openai")
         except Exception as e:
             raise Exception(f"Failed to replace vector DB heading: {str(e)}")
     

@@ -1,6 +1,5 @@
 import numpy as np
 import re
-from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from pinecone import Pinecone, IndexModel, ServerlessSpec
 
 from io import BytesIO

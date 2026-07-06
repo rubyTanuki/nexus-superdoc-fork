@@ -18,7 +18,6 @@ import urllib.request
 from pathlib import Path
 
 import numpy as np
-from langchain_core.embeddings import Embeddings
 
 # Single source of truth for the embedding dimension. all-MiniLM-L6-v2 emits 384-dim
 # vectors; the Pinecone index, the match filter, and dummy query vectors all key off this.
@@ -48,12 +47,11 @@ def _default_cache_dir() -> Path:
     return Path.home() / ".cache" / "superdoc" / "models" / "all-MiniLM-L6-v2"
 
 
-class OnnxProcessor(Embeddings):
-    """Local MiniLM embedder.
+class OnnxProcessor:
+    """
+    Mirror of obsolete OpenAIProcessor, using a local ONNX model for embedding.
 
-    Subclasses LangChain's ``Embeddings`` so it is a true drop-in wherever an
-    embeddings object is expected (e.g. ``PineconeVectorStore``), while also
-    matching ``OpenAIProcessor``'s ``embed_documents`` / ``embed_query`` surface.
+    Handles the ONNX cache lazy loading/downloading, and the embedding formatting and normalization.
     """
 
     DIMENSIONS = EMBED_DIM
